@@ -46,7 +46,6 @@ export function Toolbar({
       <div className="toolbar-divider" />
 
       {[
-        { id: 'background', label: 'Фон', icon: '🧹' },
         { id: 'outline', label: 'Обводка', icon: '🖊' },
         { id: 'cleanup', label: 'Чистка', icon: '🩹' },
         { id: 'color', label: 'Цвет', icon: '🎨' },

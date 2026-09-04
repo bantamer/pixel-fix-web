@@ -11,6 +11,7 @@ import {
 import { EditorCanvas } from './EditorCanvas'
 import { FloatingPanel } from './FloatingPanel'
 import { Toolbar, type ToolId } from './Toolbar'
+import { TOOL_HELP } from './cursors'
 import { WorkerPool } from './pool'
 import {
   clearSession,
@@ -61,6 +62,13 @@ interface StoredState {
   eraseTolerance: number
   eraseFeather: number
   panels: Record<string, boolean>
+}
+
+const TOOL_TITLES: Record<ToolId, string> = {
+  hand: 'Рука',
+  pick: 'Пипетка',
+  erase: 'Палочка',
+  lasso: 'Лассо',
 }
 
 const GALLERY_STEP = 24
@@ -540,6 +548,13 @@ export default function App() {
     setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
   }, [])
 
+  // Выбрал инструмент — открылись его параметры. Иначе непонятно, где
+  // крутить допуск: инструмент в одном месте, его ручки в другом.
+  const selectTool = useCallback((next: ToolId) => {
+    setTool(next)
+    if (next !== 'hand') setPanels((prev) => ({ ...prev, tool: true }))
+  }, [])
+
   // ---------- разметка ----------
 
   const slider = (
@@ -656,7 +671,7 @@ export default function App() {
       <div className="workspace">
         <Toolbar
           tool={tool}
-          onSelect={setTool}
+          onSelect={selectTool}
           panels={panels}
           onTogglePanel={togglePanel}
           disabled={!current}
@@ -674,46 +689,85 @@ export default function App() {
         />
       </div>
 
-      {panels.background && (
+      {panels.tool && (
         <FloatingPanel
-          id="background"
-          title="Фон и стирание"
+          id="tool"
+          title={`Инструмент: ${TOOL_TITLES[tool]}`}
           initial={{ x: 96, y: 96 }}
-          onClose={() => togglePanel('background')}
+          onClose={() => togglePanel('tool')}
         >
-          <p className="hint">
-            «Убрать фон» заливает внутрь от рамки картинки — она сама находит
-            цвета фона, включая шахматку из двух оттенков. Палочка стирает
-            область под курсором, лассо возвращает в области оригинал.
-          </p>
-          <label className="slider">
-            <span>
-              Допуск: <b>{eraseTolerance}</b>
-            </span>
-            <input
-              type="range"
-              min={1}
-              max={48}
-              value={eraseTolerance}
-              onChange={(e) => setEraseTolerance(Number(e.target.value))}
-            />
-          </label>
-          <label className="slider">
-            <span>
-              Добор края: <b>{eraseFeather}</b>
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={4}
-              value={eraseFeather}
-              onChange={(e) => setEraseFeather(Number(e.target.value))}
-            />
-          </label>
+          <p className="hint">{TOOL_HELP[tool]}</p>
+
+          {(tool === 'erase' || tool === 'lasso') && (
+            <>
+              <label className="slider">
+                <span>
+                  Допуск: <b>{eraseTolerance}</b>
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={48}
+                  value={eraseTolerance}
+                  onChange={(e) => setEraseTolerance(Number(e.target.value))}
+                />
+              </label>
+              <label className="slider">
+                <span>
+                  Добор края: <b>{eraseFeather}</b>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={4}
+                  value={eraseFeather}
+                  onChange={(e) => setEraseFeather(Number(e.target.value))}
+                />
+              </label>
+              <p className="hint">
+                Тем же допуском работает «Убрать фон»: он заливает внутрь от
+                рамки картинки, сам находя цвета фона — включая шахматку из
+                двух оттенков.
+              </p>
+              <div className="row">
+                <button onClick={dropBackground} disabled={!current}>
+                  Убрать фон
+                </button>
+                <button
+                  onClick={dropBackgroundEverywhere}
+                  disabled={assets.length < 2}
+                >
+                  У всех ({assets.length})
+                </button>
+              </div>
+            </>
+          )}
+
+          {tool === 'pick' && (
+            <div className="row">
+              <span
+                className="swatch"
+                style={{
+                  background: settings.outlineColor
+                    ? `rgb(${settings.outlineColor.join(',')})`
+                    : 'repeating-linear-gradient(45deg,#555,#555 4px,#333 4px,#333 8px)',
+                }}
+              />
+              <span className="note">
+                {settings.outlineColor
+                  ? `rgb(${settings.outlineColor.join(', ')})`
+                  : 'цвет определяется сам'}
+              </span>
+              <button
+                onClick={() => applySettings({ outlineColor: null })}
+                disabled={!settings.outlineColor}
+              >
+                Авто
+              </button>
+            </div>
+          )}
+
           <div className="row">
-            <button onClick={dropBackground} disabled={!current}>
-              Убрать фон
-            </button>
             <button onClick={undoStep} disabled={!history.length}>
               Отменить
             </button>
@@ -721,9 +775,6 @@ export default function App() {
               Вернуть
             </button>
           </div>
-          <button className="wide" onClick={dropBackgroundEverywhere} disabled={assets.length < 2}>
-            Убрать фон у всех ({assets.length})
-          </button>
           <p className="hint">
             Ползунки обработки общие для всей пачки. Стирания, лассо и убранный
             фон — у каждой картинки свои.
@@ -748,7 +799,7 @@ export default function App() {
               }}
               title={settings.outlineColor ? settings.outlineColor.join(', ') : 'определяется сам'}
             />
-            <button onClick={() => setTool('pick')}>Пипетка</button>
+            <button onClick={() => selectTool('pick')}>Взять пипеткой</button>
             <button
               onClick={() => applySettings({ outlineColor: null })}
               disabled={!settings.outlineColor}
