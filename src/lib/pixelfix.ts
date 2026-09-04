@@ -12,6 +12,7 @@ export interface Settings {
   pixelColors: number
   alphaThreshold: number
   fillHoles: boolean
+  holeMaxArea: number
   closeRadius: number
   neighborMin: number
   neighborPasses: number
@@ -26,6 +27,10 @@ export interface Settings {
   regionSmooth: number
   regionPasses: number
   regionKeep: number
+  mergeTolerance: number
+  haloStrip: number
+  haloLevel: number
+  outlineThickness: number
 }
 
 export const defaultSettings: Settings = {
@@ -35,6 +40,7 @@ export const defaultSettings: Settings = {
   pixelColors: 32,
   alphaThreshold: 128,
   fillHoles: true,
+  holeMaxArea: 400,
   closeRadius: 1,
   neighborMin: 5,
   neighborPasses: 2,
@@ -49,6 +55,10 @@ export const defaultSettings: Settings = {
   regionSmooth: 0,
   regionPasses: 1,
   regionKeep: 0.35,
+  mergeTolerance: 0,
+  haloStrip: 0,
+  haloLevel: 200,
+  outlineThickness: 0,
 }
 
 export interface Bitmap {
@@ -65,6 +75,9 @@ export interface Stats {
   smoothed: number
   recolored: number
   grid: number
+  merged: number
+  halo: number
+  outline: number
 }
 
 const NEIGHBORS: Array<[number, number]> = [
@@ -582,10 +595,129 @@ export function pixelize(
   return { image: fitCanvas(upscaleNearest(smallImage, block), w, h), grid: gridW }
 }
 
+/**
+ * Схлопывает близкие оттенки в один.
+ *
+ * Частые цвета становятся якорями, редкие липнут к ближайшему якорю в
+ * пределах допуска. В отличие от палитры фиксированного размера, редкий, но
+ * далёкий цвет (акцент, кровь на лезвии) выживает, а шум масштабирования —
+ * десяток почти одинаковых серых — сливается в один оттенок.
+ */
+export function mergeSimilar(
+  rgb: Int16Array,
+  mask: Uint8Array,
+  tolerance: number,
+): number {
+  const counts = new Map<number, number>()
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue
+    const key = (rgb[i * 3] << 16) | (rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2]
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  // Стабильный порядок: по убыванию частоты, при равенстве — по значению
+  // цвета. Иначе выбор якорей разъезжается с питоновской версией.
+  const ordered = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .map(([key]) => key)
+
+  const limit = tolerance * tolerance + 1
+  const anchors: number[] = []
+  const remap = new Map<number, number>()
+  for (const key of ordered) {
+    const r = (key >> 16) & 255
+    const g = (key >> 8) & 255
+    const b = key & 255
+    let best = -1
+    let bestDist = limit
+    for (const anchor of anchors) {
+      const dr = r - ((anchor >> 16) & 255)
+      const dg = g - ((anchor >> 8) & 255)
+      const db = b - (anchor & 255)
+      const dist = dr * dr + dg * dg + db * db
+      if (dist < bestDist) {
+        bestDist = dist
+        best = anchor
+      }
+    }
+    if (best < 0) {
+      anchors.push(key)
+      remap.set(key, key)
+    } else {
+      remap.set(key, best)
+    }
+  }
+
+  let changed = 0
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue
+    const key = (rgb[i * 3] << 16) | (rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2]
+    const target = remap.get(key)!
+    if (target === key) continue
+    rgb[i * 3] = (target >> 16) & 255
+    rgb[i * 3 + 1] = (target >> 8) & 255
+    rgb[i * 3 + 2] = target & 255
+    changed++
+  }
+  return changed
+}
+
+/** Яркость по восприятию: обводку от заливки отличаем именно по ней. */
+function luminance(r: number, g: number, b: number): number {
+  return 0.299 * r + 0.587 * g + 0.114 * b
+}
+
+/**
+ * Цвет обводки: мода среди самых тёмных пикселей кромки.
+ *
+ * Берём кольцо по краю силуэта, оставляем четверть самых тёмных и выбираем
+ * среди них самый частый цвет — так обводка находится сама, без настройки.
+ */
+export function detectOutlineColor(
+  rgb: Int16Array,
+  solid: Uint8Array,
+  w: number,
+  h: number,
+): [number, number, number] | null {
+  const ring = new Uint8Array(solid.length)
+  const inner = erode(solid, w, h, 3)
+  let count = 0
+  for (let i = 0; i < solid.length; i++) {
+    if (solid[i] && !inner[i]) {
+      ring[i] = 1
+      count++
+    }
+  }
+  if (!count) return null
+
+  const samples: Array<[number, number]> = []
+  for (let i = 0; i < ring.length; i++) {
+    if (ring[i]) samples.push([luminance(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]), i])
+  }
+  samples.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+  const dark = samples.slice(0, Math.max(1, Math.floor(samples.length * 0.25)))
+
+  const counts = new Map<number, number>()
+  for (const [, i] of dark) {
+    const key = (rgb[i * 3] << 16) | (rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2]
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  let bestKey = -1
+  let bestCount = -1
+  for (const [key, value] of counts) {
+    if (value > bestCount) {
+      bestCount = value
+      bestKey = key
+    }
+  }
+  if (bestKey < 0) return null
+  return [(bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255]
+}
+
 /** Полный пайплайн обработки одного спрайта. */
 export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; stats: Stats } {
   const stats: Stats = {
     holes: 0, gaps: 0, specks: 0, fringe: 0, smoothed: 0, recolored: 0, grid: 0,
+    merged: 0, halo: 0, outline: 0,
   }
 
   let image = input
@@ -623,8 +755,24 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
 
   if (cfg.fillHoles) {
     const outside = floodFromBorder(invert(solid), w, h)
+    const holes = new Uint8Array(total)
+    for (let i = 0; i < total; i++) holes[i] = !solid[i] && !outside[i] ? 1 : 0
+
+    if (cfg.holeMaxArea > 0) {
+      // Дырки от артефактов — считаные пиксели. Крупная замкнутая область
+      // почти всегда часть рисунка (вырез под ручку), её не трогаем.
+      const labels = connectedComponents(holes, w, h)
+      const sizes = new Map<number, number>()
+      for (let i = 0; i < total; i++) {
+        if (holes[i]) sizes.set(labels[i], (sizes.get(labels[i]) ?? 0) + 1)
+      }
+      for (let i = 0; i < total; i++) {
+        if (holes[i] && (sizes.get(labels[i]) ?? 0) > cfg.holeMaxArea) holes[i] = 0
+      }
+    }
+
     for (let i = 0; i < total; i++) {
-      if (!solid[i] && !outside[i]) {
+      if (holes[i]) {
         toFill[i] = 1
         stats.holes++
       }
@@ -685,6 +833,32 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     }
   }
 
+  if (cfg.haloStrip > 0) {
+    // Светлый ореол от вырезания фона лежит снаружи тёмной обводки. Снимаем
+    // его слоями: тёмная обводка порог не проходит и останавливает съём.
+    for (let layer = 0; layer < cfg.haloStrip; layer++) {
+      const outside = invert(solid)
+      const exposed = dilate(outside, w, h, 1)
+      const doomed = new Uint8Array(total)
+      let any = false
+      for (let i = 0; i < total; i++) {
+        if (!solid[i] || !exposed[i]) continue
+        if (luminance(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]) >= cfg.haloLevel) {
+          doomed[i] = 1
+          any = true
+        }
+      }
+      if (!any) break
+      for (let i = 0; i < total; i++) {
+        if (doomed[i]) {
+          solid[i] = 0
+          alpha[i] = 0
+          stats.halo++
+        }
+      }
+    }
+  }
+
   if (cfg.smoothRadius > 0) {
     // Доля тела в окне вокруг пикселя: порог 0.5 срезает зубцы и достраивает
     // выемки, ступенчатый контур становится плавным.
@@ -716,6 +890,10 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     }
   }
 
+  if (cfg.mergeTolerance > 0) {
+    stats.merged = mergeSimilar(rgb, solid, cfg.mergeTolerance)
+  }
+
   if (cfg.paletteColors > 0 || cfg.regionSmooth > 0) {
     // Сглаживание зон работает по индексам палитры: у сырых цветов с
     // интерполяции почти каждый пиксель уникален и голосовать не за что.
@@ -737,6 +915,26 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
         rgb[i * 3] = palette[p]
         rgb[i * 3 + 1] = palette[p + 1]
         rgb[i * 3 + 2] = palette[p + 2]
+      }
+    }
+  }
+
+  if (cfg.outlineThickness > 0) {
+    // Заливка дырок красит их модой соседей, а вокруг разрыва в обводке
+    // соседей-заливки больше — обводка так и остаётся дырявой. Поэтому
+    // кромку просто перерисовываем найденным цветом обводки.
+    const color = detectOutlineColor(rgb, solid, w, h)
+    if (color) {
+      const inner = erode(solid, w, h, cfg.outlineThickness)
+      for (let i = 0; i < total; i++) {
+        if (!solid[i] || inner[i]) continue
+        if (rgb[i * 3] === color[0] && rgb[i * 3 + 1] === color[1] && rgb[i * 3 + 2] === color[2]) {
+          continue
+        }
+        rgb[i * 3] = color[0]
+        rgb[i * 3 + 1] = color[1]
+        rgb[i * 3 + 2] = color[2]
+        stats.outline++
       }
     }
   }

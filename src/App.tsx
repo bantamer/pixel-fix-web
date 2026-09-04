@@ -257,6 +257,7 @@ export default function App() {
         <h2>Чистка обводки</h2>
         {slider('Порог альфы', 'alphaThreshold', 0, 255)}
         {slider('Закрытие щелей', 'closeRadius', 0, 4)}
+        {slider('Полости не больше, px', 'holeMaxArea', 0, 2000, 50)}
         {slider('Дырка при N соседях', 'neighborMin', 0, 8)}
         {slider('Проходов по соседям', 'neighborPasses', 0, 5)}
         {slider('Убрать мусор ≤ px', 'despeckle', 0, 12)}
@@ -267,7 +268,13 @@ export default function App() {
         {slider('Мягкость края, %', 'edgeSoftness', 0, 100, 1, 100)}
         {slider('Растяжка цвета за край', 'colorBleed', 0, 8)}
 
+        <h2>Обводка</h2>
+        {slider('Снять светлую кайму', 'haloStrip', 0, 5)}
+        {slider('Порог светлой каймы', 'haloLevel', 100, 255)}
+        {slider('Толщина обводки', 'outlineThickness', 0, 6)}
+
         <h2>Цвет</h2>
+        {slider('Слить похожие цвета', 'mergeTolerance', 0, 60)}
         {slider('Палитра, цветов', 'paletteColors', 0, 64)}
         {slider('Сглаживание цвета', 'regionSmooth', 0, 4)}
         {slider('Проходов по цвету', 'regionPasses', 1, 4)}
@@ -330,6 +337,9 @@ export default function App() {
               currentResult
                 ? `после · полости ${currentResult.stats.holes}, щели ${currentResult.stats.gaps}, ` +
                   `сглажено ${currentResult.stats.smoothed}, цвет ${currentResult.stats.recolored}` +
+                  (currentResult.stats.merged ? `, слито ${currentResult.stats.merged}` : '') +
+                  (currentResult.stats.halo ? `, кайма ${currentResult.stats.halo}` : '') +
+                  (currentResult.stats.outline ? `, обводка ${currentResult.stats.outline}` : '') +
                   (currentResult.stats.grid ? `, сетка ${currentResult.stats.grid}` : '') +
                   ` · ${currentResult.ms} мс` +
                   (currentResult.key === settingsKey ? '' : ' · пересчитываю…')
