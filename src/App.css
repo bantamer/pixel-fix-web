@@ -82,8 +82,16 @@ header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  height: 64vh;
-  min-height: 340px;
+  /* flex: none обязателен: иначе длинная галерея продавливает превью */
+  flex: none;
+  height: 68vh;
+  min-height: 420px;
+  /* Липкое, чтобы при листании галереи выбранный ассет оставался на виду. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+  padding: 8px 0;
 }
 
 .viewer-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -137,6 +145,7 @@ header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 }
 
 .gallery {
+  flex: none;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 10px;

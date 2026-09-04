@@ -121,6 +121,9 @@ export default function App() {
   }, [settingsKey, settings, assets, limit, pool])
 
   const addFiles = useCallback(async (files: File[]) => {
+    // Отменённый диалог выбора приходит пустым списком — молча выходим,
+    // иначе он затирает статус уже загруженной пачки.
+    if (!files.length) return
     const images = files.filter((f) => IMAGE_TYPES.test(f.name))
     if (!images.length) {
       setNote('картинок не нашлось: нужны png, webp, gif или bmp')
