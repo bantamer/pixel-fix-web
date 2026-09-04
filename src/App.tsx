@@ -13,6 +13,7 @@ import { EditorCanvas } from './EditorCanvas'
 import { FloatingPanel } from './FloatingPanel'
 import { Toolbar, type ToolId } from './Toolbar'
 import { TOOL_HELP } from './cursors'
+import { SHORTCUTS, TOOL_KEYS } from './shortcuts'
 import { WorkerPool } from './pool'
 import {
   clearSession,
@@ -598,6 +599,10 @@ export default function App() {
     })
   }, [addEdit])
 
+  const togglePanel = useCallback((id: string) => {
+    setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
+  }, [])
+
   const selectTool = useCallback((next: ToolId) => {
     setTool(next)
     // Своё окно есть только у палочки и лассо — там настраивать допуск.
@@ -646,18 +651,12 @@ export default function App() {
         return
       }
 
-      const byKey: Record<string, ToolId> = {
-        h: 'hand',
-        w: 'erase',
-        l: 'lasso',
-        i: 'pick',
-        // те же клавиши в русской раскладке
-        р: 'hand',
-        ц: 'erase',
-        д: 'lasso',
-        ш: 'pick',
+      if (event.key === '?') {
+        togglePanel('keys')
+        return
       }
-      const next = byKey[event.key.toLowerCase()]
+
+      const next = TOOL_KEYS[event.key.toLowerCase()]
       if (next) selectTool(next)
     }
 
@@ -677,11 +676,8 @@ export default function App() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [undoStep, redoStep, selectTool])
+  }, [undoStep, redoStep, selectTool, togglePanel])
 
-  const togglePanel = useCallback((id: string) => {
-    setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
 
   // Выбрал инструмент — открылись его параметры. Иначе непонятно, где
   // крутить допуск: инструмент в одном месте, его ручки в другом.
@@ -1110,6 +1106,35 @@ export default function App() {
               Забыть сессию
             </button>
           </div>
+        </FloatingPanel>
+      )}
+
+      <button
+        className="keys-fab"
+        onClick={() => togglePanel('keys')}
+        title="Горячие клавиши · ?"
+      >
+        ⌨
+      </button>
+
+      {panels.keys && (
+        <FloatingPanel
+          id="keys"
+          title="Горячие клавиши"
+          initial={{ x: Math.max(96, window.innerWidth - 320), y: 260 }}
+          onClose={() => togglePanel('keys')}
+        >
+          {SHORTCUTS.map((section) => (
+            <div className="keys-group" key={section.group}>
+              <h4>{section.group}</h4>
+              {section.items.map(([key, action]) => (
+                <div className="keys-row" key={key}>
+                  <kbd>{key}</kbd>
+                  <span>{action}</span>
+                </div>
+              ))}
+            </div>
+          ))}
         </FloatingPanel>
       )}
 
