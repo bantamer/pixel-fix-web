@@ -115,7 +115,6 @@ export default function App() {
   const [tool, setTool] = useState<ToolId>('hand')
   const [showOriginal, setShowOriginal] = useState(false)
   const [restored, setRestored] = useState(false)
-  const [editedUrl, setEditedUrl] = useState<{ id: string; url: string } | null>(null)
   const [eraseTolerance, setEraseTolerance] = useState(() => readState()?.eraseTolerance ?? 14)
   const [eraseFeather, setEraseFeather] = useState(() => readState()?.eraseFeather ?? 2)
   const [panels, setPanels] = useState<Record<string, boolean>>(
@@ -239,25 +238,6 @@ export default function App() {
     }, 600)
     return () => clearTimeout(timer)
   }, [edits, restored])
-
-  // Превью с учётом правок: показываем оригинал уже с вырезанным.
-  useEffect(() => {
-    if (!current || !editList.length) return
-    let alive = true
-    let created: string | null = null
-    decode(current.file)
-      .then((pixels) => applyEdits(pixels, current.id))
-      .then((image) => toBlob(image.data, image.width, image.height))
-      .then((blob) => {
-        if (!alive) return
-        created = URL.createObjectURL(blob)
-        setEditedUrl({ id: current.id, url: created })
-      })
-    return () => {
-      alive = false
-      if (created) URL.revokeObjectURL(created)
-    }
-  }, [current, editList.length, applyEdits])
 
   // ---------- файлы ----------
 
@@ -477,12 +457,12 @@ export default function App() {
           (currentResult.key === settingsKey ? '' : ' · пересчитываю…')
         : `${current.name} · считаю…`
 
+  // «Оригинал» показывает именно исходный файл, без правок и обработки:
+  // иначе кнопка возвращала бы к промежуточному шагу, а не к тому, что было.
   const canvasSource = !current
     ? null
     : showOriginal
-      ? editedUrl?.id === current.id && editList.length
-        ? editedUrl.url
-        : current.originalUrl
+      ? current.originalUrl
       : (currentResult?.url ?? current.originalUrl)
 
   return (

@@ -55,6 +55,9 @@ export function FloatingPanel({
   }, [storageKey, position])
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Захват указателя на заголовке съедает клик по крестику: событие уходит
+    // заголовку, а не кнопке. Поэтому нажатие на кнопку не начинает перенос.
+    if ((event.target as HTMLElement).closest('button')) return
     event.currentTarget.setPointerCapture(event.pointerId)
     drag.current = { dx: event.clientX - position.x, dy: event.clientY - position.y }
   }
@@ -81,7 +84,12 @@ export function FloatingPanel({
         onPointerCancel={onPointerUp}
       >
         <span>{title}</span>
-        <button className="close" onClick={onClose} title="Закрыть">
+        <button
+          className="close"
+          onClick={onClose}
+          onPointerDown={(event) => event.stopPropagation()}
+          title="Закрыть"
+        >
           ×
         </button>
       </header>
