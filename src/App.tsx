@@ -887,7 +887,7 @@ export default function App() {
             На чистом пиксель-арте они съедают градиенты — включай осознанно.
           </p>
           {slider('Слить похожие цвета', 'mergeTolerance', 0, 60)}
-          {slider('Палитра, цветов', 'paletteColors', 0, 64)}
+          {slider('Палитра, цветов', 'paletteColors', 0, 256)}
           {slider('Сглаживание цвета', 'regionSmooth', 0, 4)}
           {slider('Проходов по цвету', 'regionPasses', 1, 4)}
           {slider('Беречь тонкие линии, %', 'regionKeep', 0, 90, 1, 100)}
@@ -907,7 +907,7 @@ export default function App() {
             ступенчатыми.
           </p>
           {slider('Размер пикселя', 'pixelBlock', 0, 32)}
-          {slider('Палитра пикселизации', 'pixelColors', 2, 64)}
+          {slider('Палитра пикселизации', 'pixelColors', 2, 256)}
           {toggle('Резкая (по цвету блока)', 'pixelDominant')}
           {toggle('Вернуть исходный размер', 'pixelUpscale')}
         </FloatingPanel>
