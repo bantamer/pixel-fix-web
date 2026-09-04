@@ -580,6 +580,7 @@ export default function App() {
 
         {current && (
           <CompareViewer
+            viewKey={current.id}
             before={beforeUrl ?? current.beforeUrl}
             after={currentResult?.url ?? null}
             captionBefore={`до · ${current.name}`}

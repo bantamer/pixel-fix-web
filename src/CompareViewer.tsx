@@ -43,12 +43,15 @@ export function CompareViewer({
   captionBefore,
   captionAfter,
   onPick,
+  viewKey,
 }: {
   before: string
   after: string | null
   captionBefore: string
   captionAfter: string
   onPick?: (x: number, y: number) => void
+  /** Что считать «другой картинкой». Правки меняют before, но не вид. */
+  viewKey: string
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const leftRef = useRef<HTMLCanvasElement>(null)
@@ -94,15 +97,16 @@ export function CompareViewer({
     })
   }, [source, size])
 
-  // Вписываем заново только при смене картинки или размера окна — иначе
-  // вид сбрасывался бы после каждого пересчёта настроек.
+  // Вписываем заново только при смене ассета или размера окна. Ключ берём по
+  // viewKey, а не по before: стирание рисует новый объектный URL, и по нему
+  // вид сбрасывался бы после каждого клика пипеткой или ластиком.
   useEffect(() => {
     if (!source) return
-    const key = `${before}:${source.width}x${source.height}:${size.width}x${size.height}`
+    const key = `${viewKey}:${size.width}x${size.height}`
     if (fitted.current === key) return
     fitted.current = key
     fit()
-  }, [fit, before, source, size])
+  }, [fit, viewKey, source, size])
 
   useEffect(() => {
     const dpr = window.devicePixelRatio || 1

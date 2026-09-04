@@ -913,9 +913,36 @@ export function removeBackground(
     if (y < h - 1) push(i + w)
   }
 
-  // Добор каймы: у антиалиасной границы цвет плавно уходит в фон.
   const inSelection = new Uint8Array(w * h)
   for (const i of picked) inSelection[i] = 1
+
+  // Замкнутые карманы фона — между рукой и телом, в петлях, между прядями —
+  // заливкой от рамки не достаются. Берём их отдельно, но только когда фон
+  // многоцветный: карман из двух оттенков шахматки не спутать с бликом на
+  // рисунке, а вот однотонную белую область — запросто.
+  if (palette.length > 1) {
+    const backdrop = new Uint8Array(w * h)
+    for (let i = 0; i < w * h; i++) {
+      if (!inSelection[i] && data[i * 4 + 3] !== 0 && matches(i, limit)) backdrop[i] = 1
+    }
+    const labels = connectedComponents(backdrop, w, h)
+    const shades = new Map<number, Set<number>>()
+    for (let i = 0; i < w * h; i++) {
+      if (!backdrop[i]) continue
+      const key = (data[i * 4] << 16) | (data[i * 4 + 1] << 8) | data[i * 4 + 2]
+      const set = shades.get(labels[i]) ?? new Set<number>()
+      set.add(key)
+      shades.set(labels[i], set)
+    }
+    for (let i = 0; i < w * h; i++) {
+      if (!backdrop[i] || inSelection[i]) continue
+      if ((shades.get(labels[i])?.size ?? 0) < 2) continue
+      inSelection[i] = 1
+      picked.push(i)
+    }
+  }
+
+  // Добор каймы: у антиалиасной границы цвет плавно уходит в фон.
   for (let layer = 1; layer <= feather; layer++) {
     const wider = (tolerance * (1 + layer)) ** 2
     const ring: number[] = []
