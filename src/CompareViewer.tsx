@@ -43,6 +43,7 @@ export function CompareViewer({
   captionBefore,
   captionAfter,
   onPick,
+  onLasso,
   viewKey,
 }: {
   before: string
@@ -50,6 +51,7 @@ export function CompareViewer({
   captionBefore: string
   captionAfter: string
   onPick?: (x: number, y: number) => void
+  onLasso?: (points: Array<[number, number]>) => void
   /** Что считать «другой картинкой». Правки меняют before, но не вид. */
   viewKey: string
 }) {
@@ -62,6 +64,8 @@ export function CompareViewer({
     { before: null, after: null },
   )
   const dragging = useRef<{ x: number; y: number; moved: boolean } | null>(null)
+  const lasso = useRef<Array<[number, number]>>([])
+  const [lassoScreen, setLassoScreen] = useState<Array<[number, number]>>([])
   const fitted = useRef<string>('')
 
   // Размер холстов следует за колонкой, поэтому превью занимает всю ширину.
@@ -129,8 +133,21 @@ export function CompareViewer({
       ctx.imageSmoothingEnabled = false
       ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y)
       ctx.drawImage(bitmap, 0, 0)
+
+      if (lassoScreen.length > 1) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.beginPath()
+        ctx.moveTo(lassoScreen[0][0], lassoScreen[0][1])
+        for (const [px, py] of lassoScreen.slice(1)) ctx.lineTo(px, py)
+        ctx.closePath()
+        ctx.strokeStyle = '#4f8cff'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([5, 4])
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
     }
-  }, [bitmaps, view, size])
+  }, [bitmaps, view, size, lassoScreen])
 
   // Колесо слушаем вручную: React вешает пассивный обработчик, который
   // не даёт отменить прокрутку страницы.
@@ -158,13 +175,37 @@ export function CompareViewer({
     return () => handlers.forEach(([canvas, handler]) => canvas.removeEventListener('wheel', handler))
   }, [])
 
+  const toImage = (
+    canvas: HTMLCanvasElement,
+    clientX: number,
+    clientY: number,
+  ): [number, number] => {
+    const rect = canvas.getBoundingClientRect()
+    return [
+      (clientX - rect.left - view.x) / view.scale,
+      (clientY - rect.top - view.y) / view.scale,
+    ]
+  }
+
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
     dragging.current = { x: event.clientX, y: event.clientY, moved: false }
+    if (onLasso) {
+      lasso.current = [toImage(event.currentTarget, event.clientX, event.clientY)]
+      const rect = event.currentTarget.getBoundingClientRect()
+      setLassoScreen([[event.clientX - rect.left, event.clientY - rect.top]])
+    }
   }
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!dragging.current) return
+    if (onLasso) {
+      // В режиме лассо протяжка рисует контур, а не двигает картинку.
+      lasso.current.push(toImage(event.currentTarget, event.clientX, event.clientY))
+      const rect = event.currentTarget.getBoundingClientRect()
+      setLassoScreen((current) => [...current, [event.clientX - rect.left, event.clientY - rect.top]])
+      return
+    }
     const dx = event.clientX - dragging.current.x
     const dy = event.clientY - dragging.current.y
     if (Math.abs(dx) + Math.abs(dy) > 2) dragging.current.moved = true
@@ -174,6 +215,14 @@ export function CompareViewer({
 
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.releasePointerCapture(event.pointerId)
+    if (onLasso) {
+      const points = lasso.current
+      lasso.current = []
+      setLassoScreen([])
+      dragging.current = null
+      if (points.length > 2) onLasso(points)
+      return
+    }
     // Клик без протяжки в режиме пипетки — выбор цвета под курсором.
     if (onPick && dragging.current && !dragging.current.moved) {
       const rect = event.currentTarget.getBoundingClientRect()
@@ -202,7 +251,7 @@ export function CompareViewer({
     })
 
   const canvasProps = {
-    className: onPick ? 'viewer-canvas picking' : 'viewer-canvas',
+    className: onPick || onLasso ? 'viewer-canvas picking' : 'viewer-canvas',
     onPointerDown,
     onPointerMove,
     onPointerUp,

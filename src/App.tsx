@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import {
   defaultSettings,
+  fillPolygon,
   magicSelect,
   removeBackground,
   type Settings,
@@ -17,6 +18,12 @@ interface Asset {
   path: string
   file: File
   beforeUrl: string
+}
+
+/** Правка одного ассета: стереть пиксели или вернуть их из оригинала. */
+interface Edit {
+  type: 'erase' | 'restore'
+  pixels: Int32Array
 }
 
 interface Result {
@@ -83,7 +90,7 @@ export default function App() {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('перетащи сюда ассеты или папку')
   const [dragging, setDragging] = useState(false)
-  const [tool, setTool] = useState<'none' | 'pick' | 'erase'>('none')
+  const [tool, setTool] = useState<'none' | 'pick' | 'erase' | 'lasso'>('none')
   // Допуск стирания мал намеренно: заливка почти не растёт до 24, а дальше
   // срывается — на 32 клик в обводку уносит уже 28% спрайта.
   const [eraseTolerance, setEraseTolerance] = useState(14)
@@ -92,7 +99,7 @@ export default function App() {
   const [eraseFeather, setEraseFeather] = useState(2)
   // Ручные стирания: на ассет — стопка мазков (индексы пикселей), чтобы
   // последний можно было отменить. Правки переживают смену настроек.
-  const [erased, setErased] = useState<Map<string, Int32Array[]>>(new Map())
+  const [edits, setEdits] = useState<Map<string, Edit[]>>(new Map())
   const decoded = useRef<Map<string, { data: Uint8ClampedArray; width: number; height: number }>>(
     new Map(),
   )
@@ -101,6 +108,27 @@ export default function App() {
   // воркеры на повторном монтировании, поэтому создаём его лениво в состоянии.
   const [pool] = useState(() => new WorkerPool())
   const generation = useRef(0)
+
+  const applyEdits = useCallback(
+    (
+      image: { data: Uint8ClampedArray; width: number; height: number },
+      id: string,
+    ) => {
+      const list = edits.get(id)
+      if (!list?.length) return image
+      // Правки накатываются по порядку: восстановление снимает пометку,
+      // поставленную более ранним стиранием.
+      const hidden = new Uint8Array(image.width * image.height)
+      for (const edit of list) {
+        const value = edit.type === 'erase' ? 1 : 0
+        for (const i of edit.pixels) hidden[i] = value
+      }
+      const data = image.data.slice()
+      for (let i = 0; i < hidden.length; i++) if (hidden[i]) data[i * 4 + 3] = 0
+      return { data, width: image.width, height: image.height }
+    },
+    [edits],
+  )
 
   const visible = assets.slice(0, limit)
 
@@ -118,13 +146,7 @@ export default function App() {
         if (generation.current !== run) return
         let result
         try {
-          const strokes = erased.get(asset.id)
-          let source = await decode(asset.file)
-          if (strokes?.length) {
-            const data = source.data.slice()
-            for (const stroke of strokes) for (const i of stroke) data[i * 4 + 3] = 0
-            source = { data, width: source.width, height: source.height }
-          }
+          const source = applyEdits(await decode(asset.file), asset.id)
           result = await pool.run(source, settings)
         } catch {
           setNote(`не открылся файл ${asset.name}`)
@@ -156,7 +178,7 @@ export default function App() {
       }
     }, 250)
     return () => clearTimeout(timer)
-  }, [settingsKey, settings, assets, limit, pool, erased])
+  }, [settingsKey, settings, assets, limit, pool, applyEdits])
 
   const addFiles = useCallback(async (files: File[]) => {
     // Отменённый диалог выбора приходит пустым списком — молча выходим,
@@ -215,27 +237,37 @@ export default function App() {
     return fresh
   }, [])
 
-  const applyErasures = useCallback(
-    (
-      image: { data: Uint8ClampedArray; width: number; height: number },
-      id: string,
-    ) => {
-      const strokes = erased.get(id)
-      if (!strokes?.length) return image
-      const data = image.data.slice()
-      for (const stroke of strokes) {
-        for (const i of stroke) data[i * 4 + 3] = 0
+
+  const pushEdit = useCallback((id: string, edit: Edit) => {
+    setEdits((prev) => {
+      const next = new Map(prev)
+      next.set(id, [...(next.get(id) ?? []), edit])
+      return next
+    })
+  }, [])
+
+  const restoreArea = useCallback(
+    (points: Array<[number, number]>) => {
+      const asset = assets.find((a) => a.id === selected)
+      if (!asset) return
+      const pixels = decoded.current.get(asset.id)
+      if (!pixels) return
+      const area = fillPolygon(points, pixels.width, pixels.height)
+      if (!area.length) {
+        setNote('контур пустой — обведи область целиком')
+        return
       }
-      return { data, width: image.width, height: image.height }
+      pushEdit(asset.id, { type: 'restore', pixels: area })
+      setNote(`возвращено ${area.length} px оригинала`)
     },
-    [erased],
+    [assets, selected, pushEdit],
   )
 
   const eraseAt = useCallback(
     async (x: number, y: number) => {
       const asset = assets.find((a) => a.id === selected)
       if (!asset) return
-      const pixels = applyErasures(await loadPixels(asset), asset.id)
+      const pixels = applyEdits(await loadPixels(asset), asset.id)
       const stroke = magicSelect(
         pixels.data, pixels.width, pixels.height, x, y, eraseTolerance, eraseFeather,
       )
@@ -243,11 +275,7 @@ export default function App() {
         setNote('в этой точке уже пусто')
         return
       }
-      setErased((prev) => {
-        const next = new Map(prev)
-        next.set(asset.id, [...(next.get(asset.id) ?? []), stroke])
-        return next
-      })
+      pushEdit(asset.id, { type: 'erase', pixels: stroke })
       // Заливка идёт по связности: клик в обводку уносит её по всему спрайту,
       // поэтому крупный захват стоит назвать вслух — отменить можно кнопкой.
       let visible = 0
@@ -259,13 +287,13 @@ export default function App() {
           : `стёрто ${stroke.length} px (${share.toFixed(1)}% спрайта)`,
       )
     },
-    [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyErasures],
+    [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyEdits, pushEdit],
   )
 
   const dropBackground = useCallback(async () => {
     const asset = assets.find((a) => a.id === selected)
     if (!asset) return
-    const pixels = applyErasures(await loadPixels(asset), asset.id)
+    const pixels = applyEdits(await loadPixels(asset), asset.id)
     const stroke = removeBackground(
       pixels.data, pixels.width, pixels.height, eraseTolerance, eraseFeather,
     )
@@ -273,27 +301,23 @@ export default function App() {
       setNote('фон по рамке не нашёлся — она уже прозрачная')
       return
     }
-    setErased((prev) => {
-      const next = new Map(prev)
-      next.set(asset.id, [...(next.get(asset.id) ?? []), stroke])
-      return next
-    })
+    pushEdit(asset.id, { type: 'erase', pixels: stroke })
     setNote(`фон убран: ${stroke.length} px`)
-  }, [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyErasures])
+  }, [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyEdits, pushEdit])
 
-  const undoErase = useCallback(() => {
+  const undoEdit = useCallback(() => {
     const asset = assets.find((a) => a.id === selected)
     if (!asset) return
-    setErased((prev) => {
-      const strokes = prev.get(asset.id)
-      if (!strokes?.length) return prev
+    setEdits((prev) => {
+      const list = prev.get(asset.id)
+      if (!list?.length) return prev
       const next = new Map(prev)
-      const rest = strokes.slice(0, -1)
+      const rest = list.slice(0, -1)
       if (rest.length) next.set(asset.id, rest)
       else next.delete(asset.id)
       return next
     })
-    setNote('последнее стирание отменено')
+    setNote('последняя правка отменена')
   }, [assets, selected])
 
   const pickColor = useCallback(
@@ -343,7 +367,7 @@ export default function App() {
       const blob = cached
         ? cached.blob
         : await decode(asset.file)
-            .then((source) => pool.run(applyErasures(source, asset.id), settings))
+            .then((source) => pool.run(applyEdits(source, asset.id), settings))
             .then((r) => toBlob(r.data, r.width, r.height))
       zip.file(asset.path.replace(/\.[^.]+$/, '') + '.png', blob)
     }
@@ -353,7 +377,7 @@ export default function App() {
     link.download = 'pixel-fix.zip'
     link.click()
     setNote(`архив собран: ${assets.length} файлов`)
-  }, [assets, results, pool, settings, applyErasures])
+  }, [assets, results, pool, settings, applyEdits])
 
   const current = assets.find((a) => a.id === selected) ?? null
   const currentResult = current ? results.get(current.id) : null
@@ -361,14 +385,14 @@ export default function App() {
   // Держим отдельный URL и сверяем его с ассетом, чтобы при переключении
   // не показать чужую картинку.
   const [edited, setEdited] = useState<{ id: string; url: string } | null>(null)
-  const strokeCount = current ? (erased.get(current.id)?.length ?? 0) : 0
+  const editCount = current ? (edits.get(current.id)?.length ?? 0) : 0
 
   useEffect(() => {
-    if (!current || !strokeCount) return
+    if (!current || !editCount) return
     let alive = true
     let created: string | null = null
     loadPixels(current)
-      .then((pixels) => applyErasures(pixels, current.id))
+      .then((pixels) => applyEdits(pixels, current.id))
       .then((image) => toBlob(image.data, image.width, image.height))
       .then((blob) => {
         if (!alive) return
@@ -379,10 +403,10 @@ export default function App() {
       alive = false
       if (created) URL.revokeObjectURL(created)
     }
-  }, [current, strokeCount, loadPixels, applyErasures])
+  }, [current, editCount, loadPixels, applyEdits])
 
   const beforeUrl =
-    current && strokeCount && edited?.id === current.id ? edited.url : current?.beforeUrl
+    current && editCount && edited?.id === current.id ? edited.url : current?.beforeUrl
 
   const slider = (
     label: string,
@@ -487,7 +511,14 @@ export default function App() {
           <button onClick={dropBackground} disabled={!current}>
             Убрать фон
           </button>
-          <button onClick={undoErase} disabled={!current || !erased.get(current.id)?.length}>
+          <button
+            className={tool === 'lasso' ? 'active' : undefined}
+            onClick={() => setTool((t) => (t === 'lasso' ? 'none' : 'lasso'))}
+            disabled={!current}
+          >
+            {tool === 'lasso' ? 'Обведи область…' : 'Вернуть лассо'}
+          </button>
+          <button onClick={undoEdit} disabled={!editCount}>
             Отменить
           </button>
         </div>
@@ -585,6 +616,7 @@ export default function App() {
             after={currentResult?.url ?? null}
             captionBefore={`до · ${current.name}`}
             onPick={tool === 'pick' ? pickColor : tool === 'erase' ? eraseAt : undefined}
+            onLasso={tool === 'lasso' ? restoreArea : undefined}
             captionAfter={
               currentResult
                 ? `после · полости ${currentResult.stats.holes}, щели ${currentResult.stats.gaps}, ` +

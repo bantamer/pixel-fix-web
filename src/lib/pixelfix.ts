@@ -926,17 +926,27 @@ export function removeBackground(
       if (!inSelection[i] && data[i * 4 + 3] !== 0 && matches(i, limit)) backdrop[i] = 1
     }
     const labels = connectedComponents(backdrop, w, h)
-    const shades = new Map<number, Set<number>>()
+    const shades = new Map<number, Map<number, number>>()
     for (let i = 0; i < w * h; i++) {
       if (!backdrop[i]) continue
       const key = (data[i * 4] << 16) | (data[i * 4 + 1] << 8) | data[i * 4 + 2]
-      const set = shades.get(labels[i]) ?? new Set<number>()
-      set.add(key)
-      shades.set(labels[i], set)
+      const counts = shades.get(labels[i]) ?? new Map<number, number>()
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+      shades.set(labels[i], counts)
+    }
+    // Шахматка делит карман примерно поровну между клетками. У светлой
+    // детали рисунка — белка глаза, блика — один цвет доминирует, а прочие
+    // это единичные пиксели тени. Поэтому смотрим не на число оттенков,
+    // а на долю второго по частоте: ниже трети — это рисунок, не фон.
+    const checkered = new Set<number>()
+    for (const [label, counts] of shades) {
+      if (counts.size < 2) continue
+      const sorted = [...counts.values()].sort((a, b) => b - a)
+      const total = sorted.reduce((sum, n) => sum + n, 0)
+      if (sorted[1] / total >= 0.3) checkered.add(label)
     }
     for (let i = 0; i < w * h; i++) {
-      if (!backdrop[i] || inSelection[i]) continue
-      if ((shades.get(labels[i])?.size ?? 0) < 2) continue
+      if (!backdrop[i] || inSelection[i] || !checkered.has(labels[i])) continue
       inSelection[i] = 1
       picked.push(i)
     }
@@ -964,6 +974,49 @@ export function removeBackground(
     }
     if (!ring.length) break
     picked.push(...ring)
+  }
+  return Int32Array.from(picked)
+}
+
+/**
+ * Пиксели внутри нарисованного от руки контура — заливка по строкам.
+ *
+ * Контур замыкается автоматически, поэтому обводить область до конца
+ * не обязательно.
+ */
+export function fillPolygon(
+  points: Array<[number, number]>,
+  w: number,
+  h: number,
+): Int32Array {
+  if (points.length < 3) return new Int32Array(0)
+  let minY = h
+  let maxY = 0
+  for (const [, y] of points) {
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  minY = Math.max(0, Math.floor(minY))
+  maxY = Math.min(h - 1, Math.ceil(maxY))
+
+  const picked: number[] = []
+  const crossings: number[] = []
+  for (let y = minY; y <= maxY; y++) {
+    crossings.length = 0
+    const scan = y + 0.5
+    for (let i = 0; i < points.length; i++) {
+      const [x1, y1] = points[i]
+      const [x2, y2] = points[(i + 1) % points.length]
+      if (y1 === y2) continue
+      if (scan < Math.min(y1, y2) || scan >= Math.max(y1, y2)) continue
+      crossings.push(x1 + ((scan - y1) / (y2 - y1)) * (x2 - x1))
+    }
+    crossings.sort((a, b) => a - b)
+    for (let k = 0; k + 1 < crossings.length; k += 2) {
+      const from = Math.max(0, Math.ceil(crossings[k] - 0.5))
+      const to = Math.min(w - 1, Math.floor(crossings[k + 1] - 0.5))
+      for (let x = from; x <= to; x++) picked.push(y * w + x)
+    }
   }
   return Int32Array.from(picked)
 }
