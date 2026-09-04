@@ -7,6 +7,8 @@
 
 export interface Settings {
   pixelBlock: number
+  pixelOffsetX: number
+  pixelOffsetY: number
   pixelUpscale: boolean
   pixelDominant: boolean
   pixelColors: number
@@ -40,6 +42,8 @@ export interface Settings {
 
 export const defaultSettings: Settings = {
   pixelBlock: 0,
+  pixelOffsetX: 0,
+  pixelOffsetY: 0,
   pixelUpscale: true,
   pixelDominant: false,
   pixelColors: 32,
@@ -112,17 +116,49 @@ function shift(mask: Uint8Array, w: number, h: number, dy: number, dx: number): 
   return out
 }
 
+/**
+ * Наращивание маски на radius пикселей во все стороны, включая диагонали.
+ *
+ * Считается в два прохода — сначала по строкам, потом по столбцам, — потому
+ * что квадрат раскладывается на два отрезка: пиксель попадает в результат,
+ * если до ближайшей единицы не больше radius по строке и по столбцу.
+ * Наивное повторение соседства radius раз стоит вдвое дороже уже на пятёрке,
+ * а на 32 пикселях добавляло секунды к каждому движению ползунка.
+ */
 function dilate(mask: Uint8Array, w: number, h: number, radius: number): Uint8Array {
-  let current = mask
-  for (let r = 0; r < radius; r++) {
-    const acc = current.slice()
-    for (const [dy, dx] of NEIGHBORS) {
-      const moved = shift(current, w, h, dy, dx)
-      for (let i = 0; i < acc.length; i++) acc[i] |= moved[i]
+  if (radius <= 0) return mask
+
+  const rows = new Uint8Array(w * h)
+  for (let y = 0; y < h; y++) {
+    const base = y * w
+    let gap = w
+    for (let x = 0; x < w; x++) {
+      gap = mask[base + x] ? 0 : gap + 1
+      if (gap <= radius) rows[base + x] = 1
     }
-    current = acc
+    gap = w
+    for (let x = w - 1; x >= 0; x--) {
+      gap = mask[base + x] ? 0 : gap + 1
+      if (gap <= radius) rows[base + x] = 1
+    }
   }
-  return current
+
+  const out = new Uint8Array(w * h)
+  for (let x = 0; x < w; x++) {
+    let gap = h
+    for (let y = 0; y < h; y++) {
+      const i = y * w + x
+      gap = rows[i] ? 0 : gap + 1
+      if (gap <= radius) out[i] = 1
+    }
+    gap = h
+    for (let y = h - 1; y >= 0; y--) {
+      const i = y * w + x
+      gap = rows[i] ? 0 : gap + 1
+      if (gap <= radius) out[i] = 1
+    }
+  }
+  return out
 }
 
 function invert(mask: Uint8Array): Uint8Array {
@@ -466,39 +502,34 @@ function smoothRegions(
   return current
 }
 
-/** Подгоняет картинку под холст обрезкой или прозрачными полями по центру. */
-function fitCanvas(src: Bitmap, width: number, height: number): Bitmap {
-  if (src.width === width && src.height === height) return src
-  const out = new Uint8ClampedArray(width * height * 4)
-  const copyW = Math.min(src.width, width)
-  const copyH = Math.min(src.height, height)
-  const sy = (src.height - copyH) >> 1
-  const sx = (src.width - copyW) >> 1
-  const dy = (height - copyH) >> 1
-  const dx = (width - copyW) >> 1
-  for (let y = 0; y < copyH; y++) {
-    const from = ((sy + y) * src.width + sx) * 4
-    const to = ((dy + y) * width + dx) * 4
-    out.set(src.data.subarray(from, from + copyW * 4), to)
-  }
-  return { data: out, width, height }
-}
-
-/** Увеличение по целому множителю ближайшим соседом. */
-function upscaleNearest(src: Bitmap, factor: number): Bitmap {
-  const width = src.width * factor
-  const height = src.height * factor
+/**
+ * Разворачивает сетку арт-пикселей обратно в исходный размер ближайшим
+ * соседом. Растягивается ровно до `width`×`height`, поэтому дробный блок не
+ * копит ошибку и картинка не уезжает вбок.
+ */
+function expandGrid(
+  small: Bitmap,
+  width: number,
+  height: number,
+  block: number,
+  offsetX: number,
+  offsetY: number,
+): Bitmap {
+  const leadX = offsetX > 0 ? 1 : 0
+  const leadY = offsetY > 0 ? 1 : 0
   const out = new Uint8ClampedArray(width * height * 4)
   for (let y = 0; y < height; y++) {
-    const sy = (y / factor) | 0
+    const cellY = y < offsetY ? 0 : leadY + Math.floor((y - offsetY) / block)
+    const gy = Math.min(small.height - 1, cellY)
     for (let x = 0; x < width; x++) {
-      const sx = (x / factor) | 0
-      const from = (sy * src.width + sx) * 4
+      const cellX = x < offsetX ? 0 : leadX + Math.floor((x - offsetX) / block)
+      const gx = Math.min(small.width - 1, cellX)
+      const from = (gy * small.width + gx) * 4
       const to = (y * width + x) * 4
-      out[to] = src.data[from]
-      out[to + 1] = src.data[from + 1]
-      out[to + 2] = src.data[from + 2]
-      out[to + 3] = src.data[from + 3]
+      out[to] = small.data[from]
+      out[to + 1] = small.data[from + 1]
+      out[to + 2] = small.data[from + 2]
+      out[to + 3] = small.data[from + 3]
     }
   }
   return { data: out, width, height }
@@ -519,11 +550,28 @@ export function pixelize(
   upscale: boolean,
   dominant: boolean,
   colors: number,
+  offsetX = 0,
+  offsetY = 0,
 ): { image: Bitmap; grid: number } {
   const { width: w, height: h, data } = image
-  const gridW = Math.ceil(w / block)
-  const gridH = Math.ceil(h / block)
+  // Сдвиг сетки: картинку после растяжения часто обрезают, и первый
+  // арт-пиксель начинается не с нуля. Кусок до сдвига становится отдельной
+  // неполной ячейкой, иначе каждая ячейка соберётся из половинок соседей.
+  const leadX = offsetX > 0 ? 1 : 0
+  const leadY = offsetY > 0 ? 1 : 0
+  const gridW = leadX + Math.ceil((w - offsetX) / block)
+  const gridH = leadY + Math.ceil((h - offsetY) / block)
   const small = new Uint8ClampedArray(gridW * gridH * 4)
+  // Границы ячейки считаются с округлением вверх, потому что размер блока
+  // бывает дробным: картинку из интернета редко растягивают целым числом, и
+  // 16 px арта в 100 px картинки — это блок 6.25. Вверх, а не к ближайшему:
+  // растягивают повторением ближайшего соседа, то есть пиксель x принадлежит
+  // ячейке floor(x / block), а её левая граница — это ceil(k * block). При
+  // целом блоке округление ничего не меняет.
+  const edgeX = (gx: number) =>
+    gx <= 0 ? 0 : Math.min(w, offsetX + Math.max(0, Math.ceil((gx - leadX) * block)))
+  const edgeY = (gy: number) =>
+    gy <= 0 ? 0 : Math.min(h, offsetY + Math.max(0, Math.ceil((gy - leadY) * block)))
 
   if (dominant) {
     const total = w * h
@@ -544,8 +592,8 @@ export function pixelize(
         const votes = new Int32Array(paletteCount)
         let covered = 0
         let cells = 0
-        for (let y = gy * block; y < Math.min((gy + 1) * block, h); y++) {
-          for (let x = gx * block; x < Math.min((gx + 1) * block, w); x++) {
+        for (let y = edgeY(gy); y < edgeY(gy + 1); y++) {
+          for (let x = edgeX(gx); x < edgeX(gx + 1); x++) {
             const i = y * w + x
             cells++
             if (mask[i]) {
@@ -556,7 +604,7 @@ export function pixelize(
         }
         const out = (gy * gridW + gx) * 4
         // Блок остаётся в спрайте, если его закрывает больше половины пикселей.
-        if (!cells || covered * 2 < block * block) {
+        if (!cells || covered * 2 < cells) {
           small[out + 3] = 0
           continue
         }
@@ -575,17 +623,22 @@ export function pixelize(
         let g = 0
         let b = 0
         let a = 0
-        for (let y = gy * block; y < Math.min((gy + 1) * block, h); y++) {
-          for (let x = gx * block; x < Math.min((gx + 1) * block, w); x++) {
+        let area = 0
+        for (let y = edgeY(gy); y < edgeY(gy + 1); y++) {
+          for (let x = edgeX(gx); x < edgeX(gx + 1); x++) {
             const i = (y * w + x) * 4
             const weight = data[i + 3] / 255
             r += data[i] * weight
             g += data[i + 1] * weight
             b += data[i + 2] * weight
             a += data[i + 3]
+            area++
           }
         }
-        const area = block * block
+        if (!area) {
+          small[(gy * gridW + gx) * 4 + 3] = 0
+          continue
+        }
         const meanAlpha = a / area
         const out = (gy * gridW + gx) * 4
         if (meanAlpha < alphaThreshold) {
@@ -593,6 +646,10 @@ export function pixelize(
           continue
         }
         const weightSum = a / 255
+        if (!weightSum) {
+          small[out + 3] = 0
+          continue
+        }
         small[out] = Math.round(r / weightSum)
         small[out + 1] = Math.round(g / weightSum)
         small[out + 2] = Math.round(b / weightSum)
@@ -603,7 +660,7 @@ export function pixelize(
 
   const smallImage: Bitmap = { data: small, width: gridW, height: gridH }
   if (!upscale) return { image: smallImage, grid: gridW }
-  return { image: fitCanvas(upscaleNearest(smallImage, block), w, h), grid: gridW }
+  return { image: expandGrid(smallImage, w, h, block, offsetX, offsetY), grid: gridW }
 }
 
 /**
@@ -1031,11 +1088,20 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
   }
 
   let image = input
-  if (cfg.pixelBlock > 1) {
-    // Пикселизация идёт первой: дальше вся чистка работает уже по сетке.
+  // Размер оригинала нужен в конце: чистка идёт по сетке, а вернуть картинку
+  // надо в исходном размере.
+  const fullWidth = input.width
+  const fullHeight = input.height
+  const pixelized = cfg.pixelBlock > 1
+  if (pixelized) {
+    // Пикселизация идёт первой, и дальше вся чистка работает по сетке — то
+    // есть по маленькой картинке, где один пиксель равен одному арт-пикселю.
+    // Иначе despeckle, defringe и сглаживание режут куски меньше арт-пикселя,
+    // и на растянутом результате они видны как грязь по краю блоков.
     const result = pixelize(
       image, cfg.pixelBlock, cfg.alphaThreshold,
-      cfg.pixelUpscale, cfg.pixelDominant, cfg.pixelColors,
+      false, cfg.pixelDominant, cfg.pixelColors,
+      cfg.pixelOffsetX, cfg.pixelOffsetY,
     )
     image = result.image
     stats.grid = result.grid
@@ -1415,5 +1481,12 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     }
     out[i * 4 + 3] = alpha[i]
   }
-  return { image: { data: out, width: w, height: h }, stats }
+  const result: Bitmap = { data: out, width: w, height: h }
+  if (pixelized && cfg.pixelUpscale) {
+    return {
+      image: expandGrid(result, fullWidth, fullHeight, cfg.pixelBlock, cfg.pixelOffsetX, cfg.pixelOffsetY),
+      stats,
+    }
+  }
+  return { image: result, stats }
 }

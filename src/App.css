@@ -164,6 +164,11 @@ button.active { border-color: var(--accent); color: var(--accent); }
   flex: none;
 }
 
+/* Пикер цвета: браузерная кнопка выглядит как свотч рядом. */
+.pick-color { padding: 0; background: none; cursor: pointer; }
+.pick-color::-webkit-color-swatch-wrapper { padding: 2px; }
+.pick-color::-webkit-color-swatch { border: none; border-radius: 4px; }
+
 /* ---------- список файлов ---------- */
 
 .file-list { display: flex; flex-direction: column; gap: 4px; }

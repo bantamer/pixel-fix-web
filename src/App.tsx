@@ -8,6 +8,7 @@ import {
   type Settings,
   type Stats,
 } from './lib/pixelfix'
+import { detectPixelSize, estimateBlockSize, SURE_MAGNITUDE } from './lib/detectPixelSize'
 import { EditorCanvas } from './EditorCanvas'
 import { FloatingPanel } from './FloatingPanel'
 import { Toolbar, type ToolId } from './Toolbar'
@@ -73,9 +74,22 @@ const TOOL_TITLES: Record<ToolId, string> = {
 
 const GALLERY_STEP = 24
 const RESULT_CACHE = 120
+/** Потолок «Размера пикселя»: выше растягивают редко, а перебор дорожает. */
+const PIXEL_BLOCK_MAX = 64
+/** К какой сетке сводить картинку, в которой сетки нет. */
+const TARGET_GRID = 128
 const IMAGE_TYPES = /\.(png|webp|gif|bmp)$/i
 
 const readState = () => loadJson<StoredState>('state')
+
+const toHex = (color: [number, number, number] | null) =>
+  '#' + (color ?? [30, 30, 30]).map((v) => v.toString(16).padStart(2, '0')).join('')
+
+const fromHex = (hex: string): [number, number, number] => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+]
 
 async function decode(file: File) {
   const bitmap = await createImageBitmap(file)
@@ -475,6 +489,59 @@ export default function App() {
     setNote(`фон убран: ${stroke.length} px`)
   }, [current, eraseTolerance, eraseFeather, applyEdits, pushEdit])
 
+  /**
+   * Определяет размер арт-пикселя у выбранной картинки и ставит его в
+   * «Размер пикселя». Считается по одной картинке, а не по всей пачке:
+   * ползунки общие, и растяжение у файлов в пачке обычно одно и то же,
+   * но врать за файлы, которых пользователь не видит, не стоит.
+   */
+  const guessPixelBlock = useCallback(async () => {
+    if (!current) return
+    const pixels = applyEdits(await decode(current.file), current.id)
+    const found = detectPixelSize(pixels, { maxBlock: PIXEL_BLOCK_MAX })
+    if (!found) {
+      // Ровной сетки нет. Отказ здесь бесполезен: человек хочет привести
+      // картинку к пиксель-арту, а не услышать «нельзя». Два разных случая.
+      const rough = estimateBlockSize(pixels)
+      if (rough) {
+        // Блоки есть, но каждый стоит где придётся — общей сетки не сложилось.
+        const block = Math.min(PIXEL_BLOCK_MAX, rough)
+        applySettings({ pixelBlock: block, pixelOffsetX: 0, pixelOffsetY: 0 })
+        setNote(
+          `ровной сетки нет: блоки в картинке есть, но стоят вразнобой. ` +
+          `Типичный блок ${block} px — свёл к нему, проверь и правь ползунком.`,
+        )
+        return
+      }
+      // Картинка нарисована гладко, блоков нет вовсе.
+      const side = Math.max(pixels.width, pixels.height)
+      const guess = Math.min(PIXEL_BLOCK_MAX, Math.max(2, Math.round(side / TARGET_GRID)))
+      applySettings({ pixelBlock: guess, pixelOffsetX: 0, pixelOffsetY: 0 })
+      setNote(
+        `сетки нет — картинка нарисована гладко, а не растянута из пиксель-арта. ` +
+        `Свёл к ${TARGET_GRID} арт-пикселям по длинной стороне: блок ${guess} px. Меняй ползунком.`,
+      )
+      return
+    }
+    applySettings({
+      pixelBlock: found.block,
+      pixelOffsetX: found.offsetX,
+      pixelOffsetY: found.offsetY,
+    })
+    const size = found.block % 1 ? found.block.toFixed(2) : String(found.block)
+    const sure = Math.round(found.confidence * 100)
+    const shift =
+      found.offsetX || found.offsetY
+        ? `, сдвиг сетки ${found.offsetX},${found.offsetY} px`
+        : ''
+    const fraction = found.block % 1 ? ' (дробный — растянуто нецелым числом)' : ''
+    const doubt =
+      found.confidence < SURE_MAGNITUDE
+        ? ' — сетка слабая, проверь глазами и правь ползунком'
+        : ''
+    setNote(`размер пикселя: ${size} px${fraction}, уверенность ${sure}%${shift}${doubt}`)
+  }, [current, applyEdits, applySettings])
+
   const dropEdit = useCallback((assetId: string) => {
     setEdits((prev) => {
       const list = prev.get(assetId)
@@ -780,6 +847,13 @@ export default function App() {
               }}
               title={settings.outlineColor ? settings.outlineColor.join(', ') : 'определяется сам'}
             />
+            <input
+              type="color"
+              className="swatch pick-color"
+              value={toHex(settings.outlineColor)}
+              onChange={(e) => applySettings({ outlineColor: fromHex(e.target.value) })}
+              title="Задать цвет обводки"
+            />
             <button
               className={tool === 'pick' ? 'active' : undefined}
               onClick={() => selectTool(tool === 'pick' ? 'hand' : 'pick')}
@@ -794,6 +868,12 @@ export default function App() {
               Авто
             </button>
           </div>
+          <p className="hint">
+            Цвет обводки берётся сам — мода среди самых тёмных пикселей кромки.
+            На фотографии обводки нет, и мода оказывается оттенком тела: обводка
+            рисуется, но сливается с картинкой. Поэтому цвет можно задать
+            пипеткой по картинке или пикером, а «Авто» вернёт определение.
+          </p>
           <p className="hint">
             Рваную обводку не чинят на месте: её форма повторяет рваный силуэт.
             Сценарий снимает старую обводку, выравнивает край и рисует новую.
@@ -835,9 +915,9 @@ export default function App() {
             заливкой: голосование идёт по одной маске «обводка или нет»,
             поэтому цвета внутри картинки не участвуют и не меняются.
           </p>
-          {slider('Сгладить край обводки', 'outlineSmooth', 0, 6)}
-          {slider('Нарисовать обводку снаружи, px', 'outlineGrow', 0, 6)}
-          {slider('Перекрасить кромку внутрь, px', 'outlineThickness', 0, 6)}
+          {slider('Сгладить край обводки', 'outlineSmooth', 0, 12)}
+          {slider('Нарисовать обводку снаружи, px', 'outlineGrow', 0, 32)}
+          {slider('Перекрасить кромку внутрь, px', 'outlineThickness', 0, 32)}
           <p className="hint">
             Снаружи обводки часто остаётся светлый ореол — недоеденный фон.
             Он снимается слоями с края: пиксель уходит, если он ярче порога.
@@ -904,9 +984,28 @@ export default function App() {
           <p className="hint">
             Сводит картинку к сетке арт-пикселей. «Резкая» выбирает цвет блока
             голосованием — так тонкая обводка выживает, но градиенты станут
-            ступенчатыми.
+            ступенчатыми. Когда размер задан, вся остальная чистка работает уже
+            по сетке, и все ползунки с пикселями считают арт-пиксели: обводка
+            в 1 px — это целый блок.
           </p>
-          {slider('Размер пикселя', 'pixelBlock', 0, 32)}
+          <div className="row">
+            <button onClick={guessPixelBlock} disabled={!current}>
+              Определить размер
+            </button>
+          </div>
+          <p className="hint">
+            Ищет сетку у растянутого пиксель-арта по перепадам цвета: и размер
+            блока, и сдвиг — у обрезанной картинки первый арт-пиксель начинается
+            не с нуля, и без сдвига каждая ячейка собирается из половинок
+            соседей, оставляя ту самую рябь. Размер выходит дробным, если
+            растянули нецелым числом — ползунок такой не покажет, обработка
+            считает точно. Если ровной сетки нет, но блоки видны — они стоят
+            вразнобой, и берётся типичный размер блока. У гладкой картинки нет
+            и блоков: тогда она сводится к 128 арт-пикселям по длинной стороне.
+          </p>
+          {slider('Размер пикселя', 'pixelBlock', 0, PIXEL_BLOCK_MAX)}
+          {slider('Сдвиг сетки по X', 'pixelOffsetX', 0, 32)}
+          {slider('Сдвиг сетки по Y', 'pixelOffsetY', 0, 32)}
           {slider('Палитра пикселизации', 'pixelColors', 2, 256)}
           {toggle('Резкая (по цвету блока)', 'pixelDominant')}
           {toggle('Вернуть исходный размер', 'pixelUpscale')}
