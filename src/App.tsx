@@ -757,16 +757,20 @@ export default function App() {
           <button
             className="wide"
             onClick={() =>
+              // Только контур: слияние оттенков и сглаживание зон трогают
+              // цвет по всей картинке — на мачете это 93% внутренних
+              // пикселей. Для пиксель-арта это потеря рисунка, поэтому
+              // в сценарий они не входят и включаются вручную.
               applySettings((c) => ({
                 ...c,
                 stripOutline: 30,
                 stripDepth: 4,
-                mergeTolerance: 26,
-                smoothRadius: 4,
-                regionSmooth: 2,
+                smoothRadius: 3,
                 despeckle: 6,
                 outlineGrow: 4,
                 outlineThickness: 0,
+                mergeTolerance: 0,
+                regionSmooth: 0,
               }))
             }
           >
