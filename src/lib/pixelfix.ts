@@ -779,6 +779,7 @@ export function magicSelect(
   startX: number,
   startY: number,
   tolerance: number,
+  feather = 0,
 ): Int32Array {
   const start = startY * w + startX
   if (data[start * 4 + 3] === 0) return new Int32Array(0)
@@ -803,6 +804,139 @@ export function magicSelect(
     if (x < w - 1 && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1) }
     if (y > 0 && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w) }
     if (y < h - 1 && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w) }
+  }
+  // Добор края: у картинок с антиалиасом граница фона размыта, и заливка
+  // по допуску останавливается, оставляя светлую кайму. Каждый следующий
+  // слой берём с более широким допуском — переходные пиксели уходят,
+  // а собственно рисунок остаётся.
+  const inSelection = new Uint8Array(w * h)
+  for (const i of picked) inSelection[i] = 1
+  for (let layer = 1; layer <= feather; layer++) {
+    const wider = (tolerance * (1 + layer)) ** 2
+    const ring: number[] = []
+    for (const i of picked) {
+      const y = (i / w) | 0
+      const x = i % w
+      const neighbours = [
+        x > 0 ? i - 1 : -1,
+        x < w - 1 ? i + 1 : -1,
+        y > 0 ? i - w : -1,
+        y < h - 1 ? i + w : -1,
+      ]
+      for (const j of neighbours) {
+        if (j < 0 || inSelection[j] || data[j * 4 + 3] === 0) continue
+        const dr = data[j * 4] - target[0]
+        const dg = data[j * 4 + 1] - target[1]
+        const db = data[j * 4 + 2] - target[2]
+        if (dr * dr + dg * dg + db * db > wider) continue
+        inSelection[j] = 1
+        ring.push(j)
+      }
+    }
+    if (!ring.length) break
+    picked.push(...ring)
+  }
+  return Int32Array.from(picked)
+}
+
+/**
+ * Убирает фон: заливка внутрь от рамки картинки по цветам, что стоят на
+ * самой рамке.
+ *
+ * Цветов берём несколько, потому что «прозрачный» фон часто оказывается
+ * запечённой шахматкой из двух оттенков — одним допуском её не взять, между
+ * клетками расстояние больше, чем внутри рисунка между соседними тонами.
+ */
+export function removeBackground(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  tolerance: number,
+  feather = 0,
+): Int32Array {
+  const counts = new Map<number, number>()
+  const addSample = (i: number) => {
+    if (data[i * 4 + 3] === 0) return
+    const key = (data[i * 4] << 16) | (data[i * 4 + 1] << 8) | data[i * 4 + 2]
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  for (let x = 0; x < w; x++) {
+    addSample(x)
+    addSample((h - 1) * w + x)
+  }
+  for (let y = 0; y < h; y++) {
+    addSample(y * w)
+    addSample(y * w + w - 1)
+  }
+  // Четырёх оттенков хватает и на шахматку, и на градиентную подложку.
+  const palette = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, 4)
+    .map(([key]) => [(key >> 16) & 255, (key >> 8) & 255, key & 255])
+
+  const matches = (i: number, limit: number) => {
+    for (const color of palette) {
+      const dr = data[i * 4] - color[0]
+      const dg = data[i * 4 + 1] - color[1]
+      const db = data[i * 4 + 2] - color[2]
+      if (dr * dr + dg * dg + db * db <= limit) return true
+    }
+    return false
+  }
+
+  const limit = tolerance * tolerance
+  const seen = new Uint8Array(w * h)
+  const picked: number[] = []
+  const stack: number[] = []
+  const push = (i: number) => {
+    if (seen[i]) return
+    seen[i] = 1
+    stack.push(i)
+  }
+  for (let x = 0; x < w; x++) {
+    push(x)
+    push((h - 1) * w + x)
+  }
+  for (let y = 0; y < h; y++) {
+    push(y * w)
+    push(y * w + w - 1)
+  }
+  while (stack.length) {
+    const i = stack.pop()!
+    if (data[i * 4 + 3] !== 0 && !matches(i, limit)) continue
+    picked.push(i)
+    const y = (i / w) | 0
+    const x = i % w
+    if (x > 0) push(i - 1)
+    if (x < w - 1) push(i + 1)
+    if (y > 0) push(i - w)
+    if (y < h - 1) push(i + w)
+  }
+
+  // Добор каймы: у антиалиасной границы цвет плавно уходит в фон.
+  const inSelection = new Uint8Array(w * h)
+  for (const i of picked) inSelection[i] = 1
+  for (let layer = 1; layer <= feather; layer++) {
+    const wider = (tolerance * (1 + layer)) ** 2
+    const ring: number[] = []
+    for (const i of picked) {
+      const y = (i / w) | 0
+      const x = i % w
+      const neighbours = [
+        x > 0 ? i - 1 : -1,
+        x < w - 1 ? i + 1 : -1,
+        y > 0 ? i - w : -1,
+        y < h - 1 ? i + w : -1,
+      ]
+      for (const j of neighbours) {
+        if (j < 0 || inSelection[j] || data[j * 4 + 3] === 0) continue
+        if (!matches(j, wider)) continue
+        inSelection[j] = 1
+        ring.push(j)
+      }
+    }
+    if (!ring.length) break
+    picked.push(...ring)
   }
   return Int32Array.from(picked)
 }

@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
-import { defaultSettings, magicSelect, type Settings, type Stats } from './lib/pixelfix'
+import {
+  defaultSettings,
+  magicSelect,
+  removeBackground,
+  type Settings,
+  type Stats,
+} from './lib/pixelfix'
 import { CompareViewer } from './CompareViewer'
 import { WorkerPool } from './pool'
 import './App.css'
@@ -81,6 +87,9 @@ export default function App() {
   // Допуск стирания мал намеренно: заливка почти не растёт до 24, а дальше
   // срывается — на 32 клик в обводку уносит уже 28% спрайта.
   const [eraseTolerance, setEraseTolerance] = useState(14)
+  // Добор края: у картинок с антиалиасом граница фона размыта, и без него
+  // остаётся светлая кайма — на анимешном png это 1224 пикселя против одного.
+  const [eraseFeather, setEraseFeather] = useState(2)
   // Ручные стирания: на ассет — стопка мазков (индексы пикселей), чтобы
   // последний можно было отменить. Правки переживают смену настроек.
   const [erased, setErased] = useState<Map<string, Int32Array[]>>(new Map())
@@ -227,7 +236,9 @@ export default function App() {
       const asset = assets.find((a) => a.id === selected)
       if (!asset) return
       const pixels = applyErasures(await loadPixels(asset), asset.id)
-      const stroke = magicSelect(pixels.data, pixels.width, pixels.height, x, y, eraseTolerance)
+      const stroke = magicSelect(
+        pixels.data, pixels.width, pixels.height, x, y, eraseTolerance, eraseFeather,
+      )
       if (!stroke.length) {
         setNote('в этой точке уже пусто')
         return
@@ -248,8 +259,27 @@ export default function App() {
           : `стёрто ${stroke.length} px (${share.toFixed(1)}% спрайта)`,
       )
     },
-    [assets, selected, eraseTolerance, loadPixels, applyErasures],
+    [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyErasures],
   )
+
+  const dropBackground = useCallback(async () => {
+    const asset = assets.find((a) => a.id === selected)
+    if (!asset) return
+    const pixels = applyErasures(await loadPixels(asset), asset.id)
+    const stroke = removeBackground(
+      pixels.data, pixels.width, pixels.height, eraseTolerance, eraseFeather,
+    )
+    if (!stroke.length) {
+      setNote('фон по рамке не нашёлся — она уже прозрачная')
+      return
+    }
+    setErased((prev) => {
+      const next = new Map(prev)
+      next.set(asset.id, [...(next.get(asset.id) ?? []), stroke])
+      return next
+    })
+    setNote(`фон убран: ${stroke.length} px`)
+  }, [assets, selected, eraseTolerance, eraseFeather, loadPixels, applyErasures])
 
   const undoErase = useCallback(() => {
     const asset = assets.find((a) => a.id === selected)
@@ -454,6 +484,9 @@ export default function App() {
           >
             {tool === 'erase' ? 'Ткни в область…' : 'Стереть область'}
           </button>
+          <button onClick={dropBackground} disabled={!current}>
+            Убрать фон
+          </button>
           <button onClick={undoErase} disabled={!current || !erased.get(current.id)?.length}>
             Отменить
           </button>
@@ -468,6 +501,18 @@ export default function App() {
             max={48}
             value={eraseTolerance}
             onChange={(e) => setEraseTolerance(Number(e.target.value))}
+          />
+        </label>
+        <label className="slider">
+          <span>
+            Добор края: <b>{eraseFeather}</b>
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={4}
+            value={eraseFeather}
+            onChange={(e) => setEraseFeather(Number(e.target.value))}
           />
         </label>
 
