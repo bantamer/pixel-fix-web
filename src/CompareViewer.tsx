@@ -1,0 +1,221 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+export interface Frame {
+  data: Uint8ClampedArray
+  width: number
+  height: number
+}
+
+interface View {
+  scale: number
+  x: number
+  y: number
+}
+
+const MIN_SCALE = 0.05
+const MAX_SCALE = 64
+
+/** Шахматка рисуется в экранных координатах, поэтому клетки не «плывут» при зуме. */
+function makeChecker(ctx: CanvasRenderingContext2D): CanvasPattern {
+  const tile = document.createElement('canvas')
+  tile.width = 16
+  tile.height = 16
+  const tctx = tile.getContext('2d')!
+  tctx.fillStyle = '#d8d8d8'
+  tctx.fillRect(0, 0, 16, 16)
+  tctx.fillStyle = '#b8b8b8'
+  tctx.fillRect(0, 0, 8, 8)
+  tctx.fillRect(8, 8, 8, 8)
+  return ctx.createPattern(tile, 'repeat')!
+}
+
+async function toBitmap(frame: Frame | null): Promise<ImageBitmap | null> {
+  if (!frame) return null
+  const pixels = new Uint8ClampedArray(frame.data.buffer as ArrayBuffer)
+  return createImageBitmap(new ImageData(pixels, frame.width, frame.height))
+}
+
+/**
+ * Две картинки бок о бок с общим зумом и сдвигом: один и тот же вид
+ * рисуется на обоих холстах, поэтому глаз сравнивает одну и ту же область.
+ */
+export function CompareViewer({
+  before,
+  after,
+  captionBefore,
+  captionAfter,
+}: {
+  before: Frame
+  after: Frame | null
+  captionBefore: string
+  captionAfter: string
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const leftRef = useRef<HTMLCanvasElement>(null)
+  const rightRef = useRef<HTMLCanvasElement>(null)
+  const [size, setSize] = useState({ width: 0, height: 0 })
+  const [view, setView] = useState<View>({ scale: 1, x: 0, y: 0 })
+  const [bitmaps, setBitmaps] = useState<{ before: ImageBitmap | null; after: ImageBitmap | null }>(
+    { before: null, after: null },
+  )
+  const dragging = useRef<{ x: number; y: number } | null>(null)
+  const fitted = useRef<string>('')
+
+  // Размер холстов следует за колонкой, поэтому превью занимает всю ширину.
+  useEffect(() => {
+    const element = wrapRef.current
+    if (!element) return
+    const observer = new ResizeObserver(([entry]) => {
+      const box = entry.contentRect
+      setSize({ width: Math.max(1, (box.width - 12) / 2), height: Math.max(1, box.height - 26) })
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    Promise.all([toBitmap(before), toBitmap(after)]).then(([b, a]) => {
+      if (alive) setBitmaps({ before: b, after: a })
+    })
+    return () => {
+      alive = false
+    }
+  }, [before, after])
+
+  const fit = useCallback(() => {
+    if (!size.width || !size.height) return
+    const scale = Math.min(size.width / before.width, size.height / before.height) * 0.94
+    setView({
+      scale,
+      x: (size.width - before.width * scale) / 2,
+      y: (size.height - before.height * scale) / 2,
+    })
+  }, [before.width, before.height, size])
+
+  // Вписываем заново только при смене картинки или размера окна — иначе
+  // вид сбрасывался бы после каждого пересчёта настроек.
+  useEffect(() => {
+    const key = `${before.width}x${before.height}:${size.width}x${size.height}`
+    if (fitted.current === key) return
+    fitted.current = key
+    fit()
+  }, [fit, before.width, before.height, size])
+
+  useEffect(() => {
+    const dpr = window.devicePixelRatio || 1
+    for (const [ref, bitmap] of [
+      [leftRef, bitmaps.before],
+      [rightRef, bitmaps.after],
+    ] as const) {
+      const canvas = ref.current
+      if (!canvas) continue
+      canvas.width = Math.round(size.width * dpr)
+      canvas.height = Math.round(size.height * dpr)
+      canvas.style.width = `${size.width}px`
+      canvas.style.height = `${size.height}px`
+      const ctx = canvas.getContext('2d')!
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, size.width, size.height)
+      ctx.fillStyle = makeChecker(ctx)
+      ctx.fillRect(0, 0, size.width, size.height)
+      if (!bitmap) continue
+      ctx.imageSmoothingEnabled = false
+      ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y)
+      ctx.drawImage(bitmap, 0, 0)
+    }
+  }, [bitmaps, view, size])
+
+  // Колесо слушаем вручную: React вешает пассивный обработчик, который
+  // не даёт отменить прокрутку страницы.
+  useEffect(() => {
+    const zoomAt = (canvas: HTMLCanvasElement, event: WheelEvent) => {
+      event.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      const px = event.clientX - rect.left
+      const py = event.clientY - rect.top
+      setView((current) => {
+        const factor = Math.exp(-event.deltaY * 0.0015)
+        const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, current.scale * factor))
+        const ratio = scale / current.scale
+        return { scale, x: px - (px - current.x) * ratio, y: py - (py - current.y) * ratio }
+      })
+    }
+    const handlers: Array<[HTMLCanvasElement, (e: WheelEvent) => void]> = []
+    for (const ref of [leftRef, rightRef]) {
+      const canvas = ref.current
+      if (!canvas) continue
+      const handler = (event: WheelEvent) => zoomAt(canvas, event)
+      canvas.addEventListener('wheel', handler, { passive: false })
+      handlers.push([canvas, handler])
+    }
+    return () => handlers.forEach(([canvas, handler]) => canvas.removeEventListener('wheel', handler))
+  }, [])
+
+  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragging.current = { x: event.clientX, y: event.clientY }
+  }
+
+  const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragging.current) return
+    const dx = event.clientX - dragging.current.x
+    const dy = event.clientY - dragging.current.y
+    dragging.current = { x: event.clientX, y: event.clientY }
+    setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy }))
+  }
+
+  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.releasePointerCapture(event.pointerId)
+    dragging.current = null
+  }
+
+  const zoomBy = (factor: number) =>
+    setView((current) => {
+      const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, current.scale * factor))
+      const ratio = scale / current.scale
+      const cx = size.width / 2
+      const cy = size.height / 2
+      return { scale, x: cx - (cx - current.x) * ratio, y: cy - (cy - current.y) * ratio }
+    })
+
+  const oneToOne = () =>
+    setView((current) => {
+      const cx = size.width / 2
+      const cy = size.height / 2
+      const ratio = 1 / current.scale
+      return { scale: 1, x: cx - (cx - current.x) * ratio, y: cy - (cy - current.y) * ratio }
+    })
+
+  const canvasProps = {
+    className: 'viewer-canvas',
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerCancel: onPointerUp,
+    onDoubleClick: fit,
+  }
+
+  return (
+    <section className="viewer">
+      <div className="viewer-bar">
+        <button onClick={() => zoomBy(1 / 1.4)}>−</button>
+        <span className="zoom">{Math.round(view.scale * 100)}%</span>
+        <button onClick={() => zoomBy(1.4)}>+</button>
+        <button onClick={fit}>Вписать</button>
+        <button onClick={oneToOne}>1:1</button>
+        <span className="note">колесо — зум к курсору, перетаскивание — сдвиг, двойной клик — вписать</span>
+      </div>
+      <div className="viewer-body" ref={wrapRef}>
+        <div className="viewer-pane">
+          <canvas ref={leftRef} {...canvasProps} />
+          <figcaption>{captionBefore}</figcaption>
+        </div>
+        <div className="viewer-pane">
+          <canvas ref={rightRef} {...canvasProps} />
+          <figcaption>{captionAfter}</figcaption>
+        </div>
+      </div>
+    </section>
+  )
+}

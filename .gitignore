@@ -1,0 +1,7 @@
+node_modules
+dist
+.vercel
+.DS_Store
+
+# локальная конфигурация запуска с путями этой машины
+.claude
