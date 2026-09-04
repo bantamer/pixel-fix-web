@@ -257,7 +257,7 @@ export default function App() {
         <h2>Чистка обводки</h2>
         {slider('Порог альфы', 'alphaThreshold', 0, 255)}
         {slider('Закрытие щелей', 'closeRadius', 0, 4)}
-        {slider('Полости не больше, px', 'holeMaxArea', 0, 2000, 50)}
+        {slider('Отверстие — от толщины, px', 'holeThickness', 0, 6)}
         {slider('Дырка при N соседях', 'neighborMin', 0, 8)}
         {slider('Проходов по соседям', 'neighborPasses', 0, 5)}
         {slider('Убрать мусор ≤ px', 'despeckle', 0, 12)}

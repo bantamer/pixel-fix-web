@@ -12,7 +12,7 @@ export interface Settings {
   pixelColors: number
   alphaThreshold: number
   fillHoles: boolean
-  holeMaxArea: number
+  holeThickness: number
   closeRadius: number
   neighborMin: number
   neighborPasses: number
@@ -40,7 +40,7 @@ export const defaultSettings: Settings = {
   pixelColors: 32,
   alphaThreshold: 128,
   fillHoles: true,
-  holeMaxArea: 400,
+  holeThickness: 2,
   closeRadius: 1,
   neighborMin: 5,
   neighborPasses: 2,
@@ -758,16 +758,19 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     const holes = new Uint8Array(total)
     for (let i = 0; i < total; i++) holes[i] = !solid[i] && !outside[i] ? 1 : 0
 
-    if (cfg.holeMaxArea > 0) {
-      // Дырки от артефактов — считаные пиксели. Крупная замкнутая область
-      // почти всегда часть рисунка (вырез под ручку), её не трогаем.
-      const labels = connectedComponents(holes, w, h)
-      const sizes = new Map<number, number>()
-      for (let i = 0; i < total; i++) {
-        if (holes[i]) sizes.set(labels[i], (sizes.get(labels[i]) ?? 0) + 1)
-      }
-      for (let i = 0; i < total; i++) {
-        if (holes[i] && (sizes.get(labels[i]) ?? 0) > cfg.holeMaxArea) holes[i] = 0
+    if (cfg.holeThickness > 0) {
+      // Артефакт — тонкая щель вдоль обводки: она может быть длинной, но
+      // никогда не бывает толстой. Настоящее отверстие в рисунке переживает
+      // эрозию, поэтому решает толщина, а не площадь: у кирки есть дырка
+      // в 43 пикселя, которую любой порог по площади залил бы.
+      const thick = erode(holes, w, h, cfg.holeThickness)
+      if (thick.some((v) => v)) {
+        const labels = connectedComponents(holes, w, h)
+        const keep = new Set<number>()
+        for (let i = 0; i < total; i++) if (thick[i]) keep.add(labels[i])
+        for (let i = 0; i < total; i++) {
+          if (holes[i] && keep.has(labels[i])) holes[i] = 0
+        }
       }
     }
 
