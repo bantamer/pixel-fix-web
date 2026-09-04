@@ -78,7 +78,9 @@ export default function App() {
   const [note, setNote] = useState('перетащи сюда ассеты или папку')
   const [dragging, setDragging] = useState(false)
   const [tool, setTool] = useState<'none' | 'pick' | 'erase'>('none')
-  const [eraseTolerance, setEraseTolerance] = useState(40)
+  // Допуск стирания мал намеренно: заливка почти не растёт до 24, а дальше
+  // срывается — на 32 клик в обводку уносит уже 28% спрайта.
+  const [eraseTolerance, setEraseTolerance] = useState(14)
   // Ручные стирания: на ассет — стопка мазков (индексы пикселей), чтобы
   // последний можно было отменить. Правки переживают смену настроек.
   const [erased, setErased] = useState<Map<string, Int32Array[]>>(new Map())
@@ -462,8 +464,8 @@ export default function App() {
           </span>
           <input
             type="range"
-            min={0}
-            max={120}
+            min={1}
+            max={48}
             value={eraseTolerance}
             onChange={(e) => setEraseTolerance(Number(e.target.value))}
           />
