@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
-import { defaultSettings, type Settings, type Stats } from './lib/pixelfix'
+import { defaultSettings, magicSelect, type Settings, type Stats } from './lib/pixelfix'
 import { CompareViewer } from './CompareViewer'
 import { WorkerPool } from './pool'
 import './App.css'
@@ -77,7 +77,14 @@ export default function App() {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('перетащи сюда ассеты или папку')
   const [dragging, setDragging] = useState(false)
-  const [picking, setPicking] = useState(false)
+  const [tool, setTool] = useState<'none' | 'pick' | 'erase'>('none')
+  const [eraseTolerance, setEraseTolerance] = useState(40)
+  // Ручные стирания: на ассет — стопка мазков (индексы пикселей), чтобы
+  // последний можно было отменить. Правки переживают смену настроек.
+  const [erased, setErased] = useState<Map<string, Int32Array[]>>(new Map())
+  const decoded = useRef<Map<string, { data: Uint8ClampedArray; width: number; height: number }>>(
+    new Map(),
+  )
 
   // Пул живёт всю сессию страницы. В StrictMode эффект с cleanup убил бы
   // воркеры на повторном монтировании, поэтому создаём его лениво в состоянии.
@@ -100,8 +107,14 @@ export default function App() {
         if (generation.current !== run) return
         let result
         try {
-          const decoded = await decode(asset.file)
-          result = await pool.run(decoded, settings)
+          const strokes = erased.get(asset.id)
+          let source = await decode(asset.file)
+          if (strokes?.length) {
+            const data = source.data.slice()
+            for (const stroke of strokes) for (const i of stroke) data[i * 4 + 3] = 0
+            source = { data, width: source.width, height: source.height }
+          }
+          result = await pool.run(source, settings)
         } catch {
           setNote(`не открылся файл ${asset.name}`)
           setBusy((n) => n - 1)
@@ -132,7 +145,7 @@ export default function App() {
       }
     }, 250)
     return () => clearTimeout(timer)
-  }, [settingsKey, settings, assets, limit, pool])
+  }, [settingsKey, settings, assets, limit, pool, erased])
 
   const addFiles = useCallback(async (files: File[]) => {
     // Отменённый диалог выбора приходит пустым списком — молча выходим,
@@ -182,26 +195,95 @@ export default function App() {
     [addFiles],
   )
 
+  const loadPixels = useCallback(async (asset: Asset) => {
+    const cached = decoded.current.get(asset.id)
+    if (cached) return cached
+    const fresh = await decode(asset.file)
+    decoded.current.clear() // держим только текущий: кадр 1024×1024 весит 4 МБ
+    decoded.current.set(asset.id, fresh)
+    return fresh
+  }, [])
+
+  const applyErasures = useCallback(
+    (
+      image: { data: Uint8ClampedArray; width: number; height: number },
+      id: string,
+    ) => {
+      const strokes = erased.get(id)
+      if (!strokes?.length) return image
+      const data = image.data.slice()
+      for (const stroke of strokes) {
+        for (const i of stroke) data[i * 4 + 3] = 0
+      }
+      return { data, width: image.width, height: image.height }
+    },
+    [erased],
+  )
+
+  const eraseAt = useCallback(
+    async (x: number, y: number) => {
+      const asset = assets.find((a) => a.id === selected)
+      if (!asset) return
+      const pixels = applyErasures(await loadPixels(asset), asset.id)
+      const stroke = magicSelect(pixels.data, pixels.width, pixels.height, x, y, eraseTolerance)
+      if (!stroke.length) {
+        setNote('в этой точке уже пусто')
+        return
+      }
+      setErased((prev) => {
+        const next = new Map(prev)
+        next.set(asset.id, [...(next.get(asset.id) ?? []), stroke])
+        return next
+      })
+      // Заливка идёт по связности: клик в обводку уносит её по всему спрайту,
+      // поэтому крупный захват стоит назвать вслух — отменить можно кнопкой.
+      let visible = 0
+      for (let i = 3; i < pixels.data.length; i += 4) if (pixels.data[i] > 128) visible++
+      const share = visible ? (stroke.length / visible) * 100 : 0
+      setNote(
+        share > 15
+          ? `стёрто ${stroke.length} px — это ${share.toFixed(0)}% спрайта, проверь и отмени при промахе`
+          : `стёрто ${stroke.length} px (${share.toFixed(1)}% спрайта)`,
+      )
+    },
+    [assets, selected, eraseTolerance, loadPixels, applyErasures],
+  )
+
+  const undoErase = useCallback(() => {
+    const asset = assets.find((a) => a.id === selected)
+    if (!asset) return
+    setErased((prev) => {
+      const strokes = prev.get(asset.id)
+      if (!strokes?.length) return prev
+      const next = new Map(prev)
+      const rest = strokes.slice(0, -1)
+      if (rest.length) next.set(asset.id, rest)
+      else next.delete(asset.id)
+      return next
+    })
+    setNote('последнее стирание отменено')
+  }, [assets, selected])
+
   const pickColor = useCallback(
     async (x: number, y: number) => {
       const asset = assets.find((a) => a.id === selected)
       if (!asset) return
-      const decoded = await decode(asset.file)
-      const index = (y * decoded.width + x) * 4
-      if (decoded.data[index + 3] === 0) {
+      const pixels = await loadPixels(asset)
+      const index = (y * pixels.width + x) * 4
+      if (pixels.data[index + 3] === 0) {
         setNote('в этой точке пусто — ткни в саму обводку')
         return
       }
       const color: [number, number, number] = [
-        decoded.data[index],
-        decoded.data[index + 1],
-        decoded.data[index + 2],
+        pixels.data[index],
+        pixels.data[index + 1],
+        pixels.data[index + 2],
       ]
       setSettings((current) => ({ ...current, outlineColor: color }))
-      setPicking(false)
+      setTool('none')
       setNote(`цвет обводки: rgb(${color.join(', ')})`)
     },
-    [assets, selected],
+    [assets, selected, loadPixels],
   )
 
   const applyOutlineFlow = useCallback(() => {
@@ -229,7 +311,7 @@ export default function App() {
       const blob = cached
         ? cached.blob
         : await decode(asset.file)
-            .then((decoded) => pool.run(decoded, settings))
+            .then((source) => pool.run(applyErasures(source, asset.id), settings))
             .then((r) => toBlob(r.data, r.width, r.height))
       zip.file(asset.path.replace(/\.[^.]+$/, '') + '.png', blob)
     }
@@ -239,10 +321,36 @@ export default function App() {
     link.download = 'pixel-fix.zip'
     link.click()
     setNote(`архив собран: ${assets.length} файлов`)
-  }, [assets, results, pool, settings])
+  }, [assets, results, pool, settings, applyErasures])
 
   const current = assets.find((a) => a.id === selected) ?? null
   const currentResult = current ? results.get(current.id) : null
+  // Превью «до» показывает стирания, иначе непонятно, что уже вырезано.
+  // Держим отдельный URL и сверяем его с ассетом, чтобы при переключении
+  // не показать чужую картинку.
+  const [edited, setEdited] = useState<{ id: string; url: string } | null>(null)
+  const strokeCount = current ? (erased.get(current.id)?.length ?? 0) : 0
+
+  useEffect(() => {
+    if (!current || !strokeCount) return
+    let alive = true
+    let created: string | null = null
+    loadPixels(current)
+      .then((pixels) => applyErasures(pixels, current.id))
+      .then((image) => toBlob(image.data, image.width, image.height))
+      .then((blob) => {
+        if (!alive) return
+        created = URL.createObjectURL(blob)
+        setEdited({ id: current.id, url: created })
+      })
+    return () => {
+      alive = false
+      if (created) URL.revokeObjectURL(created)
+    }
+  }, [current, strokeCount, loadPixels, applyErasures])
+
+  const beforeUrl =
+    current && strokeCount && edited?.id === current.id ? edited.url : current?.beforeUrl
 
   const slider = (
     label: string,
@@ -314,11 +422,11 @@ export default function App() {
         </button>
         <div className="picker">
           <button
-            className={picking ? 'active' : undefined}
-            onClick={() => setPicking((on) => !on)}
+            className={tool === 'pick' ? 'active' : undefined}
+            onClick={() => setTool((t) => (t === 'pick' ? 'none' : 'pick'))}
             disabled={!current}
           >
-            {picking ? 'Ткни в обводку…' : 'Пипетка'}
+            {tool === 'pick' ? 'Ткни в обводку…' : 'Пипетка'}
           </button>
           <span
             className="swatch"
@@ -336,6 +444,31 @@ export default function App() {
             Авто
           </button>
         </div>
+        <div className="picker">
+          <button
+            className={tool === 'erase' ? 'active' : undefined}
+            onClick={() => setTool((t) => (t === 'erase' ? 'none' : 'erase'))}
+            disabled={!current}
+          >
+            {tool === 'erase' ? 'Ткни в область…' : 'Стереть область'}
+          </button>
+          <button onClick={undoErase} disabled={!current || !erased.get(current.id)?.length}>
+            Отменить
+          </button>
+        </div>
+        <label className="slider">
+          <span>
+            Допуск стирания: <b>{eraseTolerance}</b>
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={120}
+            value={eraseTolerance}
+            onChange={(e) => setEraseTolerance(Number(e.target.value))}
+          />
+        </label>
+
         {slider('Снять обводку (допуск)', 'stripOutline', 0, 90)}
         {slider('Глубина съёма, px', 'stripDepth', 1, 10)}
         {slider('Нарисовать обводку', 'outlineGrow', 0, 6)}
@@ -400,10 +533,10 @@ export default function App() {
 
         {current && (
           <CompareViewer
-            before={current.beforeUrl}
+            before={beforeUrl ?? current.beforeUrl}
             after={currentResult?.url ?? null}
             captionBefore={`до · ${current.name}`}
-            onPick={picking ? pickColor : undefined}
+            onPick={tool === 'pick' ? pickColor : tool === 'erase' ? eraseAt : undefined}
             captionAfter={
               currentResult
                 ? `после · полости ${currentResult.stats.holes}, щели ${currentResult.stats.gaps}, ` +

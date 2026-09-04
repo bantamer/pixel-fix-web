@@ -765,6 +765,48 @@ export function stripOutlineColor(
   return doomed
 }
 
+/**
+ * Выделяет связную область похожего цвета от точки клика — «волшебная
+ * палочка». Возвращает индексы пикселей.
+ *
+ * Обход по четырём соседям, а не восьми: по диагонали заливка утекает через
+ * стык пикселей туда, где визуально сплошная линия.
+ */
+export function magicSelect(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  startX: number,
+  startY: number,
+  tolerance: number,
+): Int32Array {
+  const start = startY * w + startX
+  if (data[start * 4 + 3] === 0) return new Int32Array(0)
+  const target = [data[start * 4], data[start * 4 + 1], data[start * 4 + 2]]
+  const limit = tolerance * tolerance
+
+  const seen = new Uint8Array(w * h)
+  const picked: number[] = []
+  const stack = [start]
+  seen[start] = 1
+  while (stack.length) {
+    const i = stack.pop()!
+    if (data[i * 4 + 3] === 0) continue
+    const dr = data[i * 4] - target[0]
+    const dg = data[i * 4 + 1] - target[1]
+    const db = data[i * 4 + 2] - target[2]
+    if (dr * dr + dg * dg + db * db > limit) continue
+    picked.push(i)
+    const y = (i / w) | 0
+    const x = i % w
+    if (x > 0 && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1) }
+    if (x < w - 1 && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1) }
+    if (y > 0 && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w) }
+    if (y < h - 1 && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w) }
+  }
+  return Int32Array.from(picked)
+}
+
 /** Полный пайплайн обработки одного спрайта. */
 export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; stats: Stats } {
   const stats: Stats = {
