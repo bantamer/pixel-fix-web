@@ -682,7 +682,9 @@ export default function App() {
           onClose={() => togglePanel('background')}
         >
           <p className="hint">
-            Палочка стирает область по клику, лассо возвращает оригинал.
+            «Убрать фон» заливает внутрь от рамки картинки — она сама находит
+            цвета фона, включая шахматку из двух оттенков. Палочка стирает
+            область под курсором, лассо возвращает в области оригинал.
           </p>
           <label className="slider">
             <span>
@@ -754,6 +756,11 @@ export default function App() {
               Авто
             </button>
           </div>
+          <p className="hint">
+            Рваную обводку не чинят на месте: её форма повторяет рваный силуэт.
+            Сценарий снимает старую обводку, выравнивает край и рисует новую.
+            Цвета внутри картинки он не трогает.
+          </p>
           <button
             className="wide"
             onClick={() =>
@@ -792,6 +799,10 @@ export default function App() {
           initial={{ x: 160, y: 160 }}
           onClose={() => togglePanel('cleanup')}
         >
+          <p className="hint">
+            Дырки в обводке и мусор по краю. Отверстия рисунка отличаются от
+            артефактов толщиной, а не размером.
+          </p>
           {slider('Порог альфы', 'alphaThreshold', 0, 255)}
           {slider('Отверстие — от толщины, px', 'holeThickness', 0, 6)}
           {slider('Закрытие щелей', 'closeRadius', 0, 4)}
@@ -815,6 +826,10 @@ export default function App() {
           initial={{ x: 192, y: 192 }}
           onClose={() => togglePanel('color')}
         >
+          <p className="hint">
+            Эти ручки меняют цвет по всей площади картинки, а не по краю.
+            На чистом пиксель-арте они съедают градиенты — включай осознанно.
+          </p>
           {slider('Слить похожие цвета', 'mergeTolerance', 0, 60)}
           {slider('Палитра, цветов', 'paletteColors', 0, 64)}
           {slider('Сглаживание цвета', 'regionSmooth', 0, 4)}
@@ -830,6 +845,11 @@ export default function App() {
           initial={{ x: 224, y: 224 }}
           onClose={() => togglePanel('pixelize')}
         >
+          <p className="hint">
+            Сводит картинку к сетке арт-пикселей. «Резкая» выбирает цвет блока
+            голосованием — так тонкая обводка выживает, но градиенты станут
+            ступенчатыми.
+          </p>
           {slider('Размер пикселя', 'pixelBlock', 0, 32)}
           {slider('Палитра пикселизации', 'pixelColors', 2, 64)}
           {toggle('Резкая (по цвету блока)', 'pixelDominant')}

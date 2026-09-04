@@ -108,11 +108,14 @@ button.active { border-color: var(--accent); color: var(--accent); }
 }
 .stage-body { flex: 1; min-height: 0; position: relative; }
 .stage-canvas { display: block; touch-action: none; }
-.stage-canvas.tool-hand { cursor: grab; }
-.stage-canvas.tool-hand:active { cursor: grabbing; }
-.stage-canvas.tool-pick,
-.stage-canvas.tool-erase { cursor: crosshair; }
-.stage-canvas.tool-lasso { cursor: cell; }
+
+.stage-help {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
 
 /* ---------- плавающие окна ---------- */
 

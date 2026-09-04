@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { CURSORS, TOOL_HELP } from './cursors'
 
 interface View {
   scale: number
@@ -275,12 +276,14 @@ export function EditorCanvas({
         </button>
         <span className="note">{overlay}</span>
       </div>
+      <div className="stage-help">{TOOL_HELP[tool]}</div>
       <div className={compareMode ? 'stage-body compare' : 'stage-body'} ref={wrapRef}>
         {compareMode && (
           <div className="stage-pane">
             <canvas
               ref={compareRef}
-              className={`stage-canvas tool-${tool}`}
+              className="stage-canvas"
+              style={{ cursor: CURSORS[tool] }}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
@@ -293,7 +296,8 @@ export function EditorCanvas({
         <div className="stage-pane">
           <canvas
             ref={canvasRef}
-            className={`stage-canvas tool-${tool}`}
+            className="stage-canvas"
+            style={{ cursor: CURSORS[tool] }}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
