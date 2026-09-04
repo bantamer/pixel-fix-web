@@ -23,6 +23,44 @@ function makeChecker(ctx: CanvasRenderingContext2D): CanvasPattern {
   return ctx.createPattern(tile, 'repeat')!
 }
 
+/** Рисует один холст: шахматка, картинка в текущем виде, контур лассо. */
+function paint(
+  canvas: HTMLCanvasElement | null,
+  image: ImageBitmap | null,
+  view: View,
+  size: { width: number; height: number },
+  lassoScreen: Array<[number, number]>,
+): void {
+  if (!canvas) return
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = Math.round(size.width * dpr)
+  canvas.height = Math.round(size.height * dpr)
+  canvas.style.width = `${size.width}px`
+  canvas.style.height = `${size.height}px`
+  const ctx = canvas.getContext('2d')!
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, size.width, size.height)
+  ctx.fillStyle = makeChecker(ctx)
+  ctx.fillRect(0, 0, size.width, size.height)
+  if (image) {
+    ctx.imageSmoothingEnabled = false
+    ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y)
+    ctx.drawImage(image, 0, 0)
+  }
+  if (lassoScreen.length > 1) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.beginPath()
+    ctx.moveTo(lassoScreen[0][0], lassoScreen[0][1])
+    for (const [px, py] of lassoScreen.slice(1)) ctx.lineTo(px, py)
+    ctx.closePath()
+    ctx.strokeStyle = '#4f8cff'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([5, 4])
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+}
+
 async function toBitmap(src: string | null): Promise<ImageBitmap | null> {
   if (!src) return null
   const blob = await fetch(src).then((response) => response.blob())
@@ -37,29 +75,36 @@ async function toBitmap(src: string | null): Promise<ImageBitmap | null> {
  */
 export function EditorCanvas({
   source,
+  compare,
   overlay,
   viewKey,
   tool,
+  compareMode,
+  onToggleCompare,
   onPick,
   onLasso,
-  onZoom,
 }: {
   /** Что показывать сейчас — результат или оригинал. */
   source: string | null
+  /** Второй холст для сравнения. Null — режим выключен. */
+  compare: string | null
   /** Подпись поверх холста. */
   overlay: string
   /** Что считать другой картинкой: правки меняют src, но не вид. */
   viewKey: string
   tool: 'hand' | 'pick' | 'erase' | 'lasso'
+  compareMode: boolean
+  onToggleCompare: () => void
   onPick?: (x: number, y: number) => void
   onLasso?: (points: Array<[number, number]>) => void
-  onZoom?: (scale: number) => void
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const compareRef = useRef<HTMLCanvasElement>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
   const [view, setView] = useState<View>({ scale: 1, x: 0, y: 0 })
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null)
+  const [compareBitmap, setCompareBitmap] = useState<ImageBitmap | null>(null)
   const [lassoScreen, setLassoScreen] = useState<Array<[number, number]>>([])
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const lasso = useRef<Array<[number, number]>>([])
@@ -70,11 +115,13 @@ export function EditorCanvas({
     if (!element) return
     const observer = new ResizeObserver(([entry]) => {
       const box = entry.contentRect
-      setSize({ width: Math.max(1, box.width), height: Math.max(1, box.height) })
+      // В режиме сравнения каждому холсту достаётся половина минус зазор.
+      const width = compareMode ? (box.width - 8) / 2 : box.width
+      setSize({ width: Math.max(1, width), height: Math.max(1, box.height) })
     })
     observer.observe(element)
     return () => observer.disconnect()
-  }, [])
+  }, [compareMode])
 
   useEffect(() => {
     let alive = true
@@ -85,6 +132,16 @@ export function EditorCanvas({
       alive = false
     }
   }, [source])
+
+  useEffect(() => {
+    let alive = true
+    toBitmap(compareMode ? compare : null).then((next) => {
+      if (alive) setCompareBitmap(next)
+    })
+    return () => {
+      alive = false
+    }
+  }, [compare, compareMode])
 
   const fit = useCallback(() => {
     if (!size.width || !size.height || !bitmap) return
@@ -100,54 +157,27 @@ export function EditorCanvas({
   // настроек не должны сбрасывать зум.
   useEffect(() => {
     if (!bitmap) return
-    const key = `${viewKey}:${size.width}x${size.height}`
+    const key = `${viewKey}:${size.width}x${size.height}:${compareMode}`
     if (fitted.current === key) return
     fitted.current = key
     fit()
-  }, [fit, viewKey, bitmap, size])
-
-  useEffect(() => onZoom?.(view.scale), [view.scale, onZoom])
+  }, [fit, viewKey, bitmap, size, compareMode])
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const dpr = window.devicePixelRatio || 1
-    canvas.width = Math.round(size.width * dpr)
-    canvas.height = Math.round(size.height * dpr)
-    canvas.style.width = `${size.width}px`
-    canvas.style.height = `${size.height}px`
-    const ctx = canvas.getContext('2d')!
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, size.width, size.height)
-    ctx.fillStyle = makeChecker(ctx)
-    ctx.fillRect(0, 0, size.width, size.height)
-    if (bitmap) {
-      ctx.imageSmoothingEnabled = false
-      ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y)
-      ctx.drawImage(bitmap, 0, 0)
-    }
-    if (lassoScreen.length > 1) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      ctx.beginPath()
-      ctx.moveTo(lassoScreen[0][0], lassoScreen[0][1])
-      for (const [px, py] of lassoScreen.slice(1)) ctx.lineTo(px, py)
-      ctx.closePath()
-      ctx.strokeStyle = '#4f8cff'
-      ctx.lineWidth = 1.5
-      ctx.setLineDash([5, 4])
-      ctx.stroke()
-      ctx.setLineDash([])
-    }
-  }, [bitmap, view, size, lassoScreen])
+    // Оба холста рисуют один и тот же вид, поэтому глаз сравнивает одну и
+    // ту же область при любом зуме.
+    if (compareMode) paint(compareRef.current, compareBitmap, view, size, lassoScreen)
+    paint(canvasRef.current, bitmap, view, size, lassoScreen)
+  }, [bitmap, compareBitmap, compareMode, view, size, lassoScreen])
 
   // Колесо слушаем вручную: React вешает пассивный обработчик, который не
   // даёт отменить прокрутку страницы.
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
+    const targets = [canvasRef.current, compareRef.current].filter(Boolean) as HTMLCanvasElement[]
+    if (!targets.length) return
     const handler = (event: WheelEvent) => {
       event.preventDefault()
-      const rect = canvas.getBoundingClientRect()
+      const rect = (event.currentTarget as HTMLCanvasElement).getBoundingClientRect()
       const px = event.clientX - rect.left
       const py = event.clientY - rect.top
       setView((current) => {
@@ -157,9 +187,11 @@ export function EditorCanvas({
         return { scale, x: px - (px - current.x) * ratio, y: py - (py - current.y) * ratio }
       })
     }
-    canvas.addEventListener('wheel', handler, { passive: false })
-    return () => canvas.removeEventListener('wheel', handler)
-  }, [])
+    for (const target of targets) target.addEventListener('wheel', handler, { passive: false })
+    return () => {
+      for (const target of targets) target.removeEventListener('wheel', handler)
+    }
+  }, [compareMode])
 
   const toImage = (
     canvas: HTMLCanvasElement,
@@ -238,18 +270,38 @@ export function EditorCanvas({
         <button onClick={() => zoomBy(1.4)}>+</button>
         <button onClick={fit}>Вписать</button>
         <button onClick={() => setView((c) => ({ ...c, scale: 1 }))}>1:1</button>
+        <button className={compareMode ? 'active' : undefined} onClick={onToggleCompare}>
+          Сравнить
+        </button>
         <span className="note">{overlay}</span>
       </div>
-      <div className="stage-body" ref={wrapRef}>
-        <canvas
-          ref={canvasRef}
-          className={`stage-canvas tool-${tool}`}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-          onDoubleClick={fit}
-        />
+      <div className={compareMode ? 'stage-body compare' : 'stage-body'} ref={wrapRef}>
+        {compareMode && (
+          <div className="stage-pane">
+            <canvas
+              ref={compareRef}
+              className={`stage-canvas tool-${tool}`}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+              onDoubleClick={fit}
+            />
+            <span className="pane-label">оригинал</span>
+          </div>
+        )}
+        <div className="stage-pane">
+          <canvas
+            ref={canvasRef}
+            className={`stage-canvas tool-${tool}`}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            onDoubleClick={fit}
+          />
+          {compareMode && <span className="pane-label">результат</span>}
+        </div>
       </div>
     </div>
   )

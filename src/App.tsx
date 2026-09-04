@@ -114,6 +114,7 @@ export default function App() {
   const [dragging, setDragging] = useState(false)
   const [tool, setTool] = useState<ToolId>('hand')
   const [showOriginal, setShowOriginal] = useState(false)
+  const [compareMode, setCompareMode] = useState(false)
   const [restored, setRestored] = useState(false)
   const [eraseTolerance, setEraseTolerance] = useState(() => readState()?.eraseTolerance ?? 14)
   const [eraseFeather, setEraseFeather] = useState(() => readState()?.eraseFeather ?? 2)
@@ -376,6 +377,33 @@ export default function App() {
     [current, pushEdit],
   )
 
+  const dropBackgroundEverywhere = useCallback(async () => {
+    // Настройки общие для всей пачки, а правки — свои у каждой картинки.
+    // Поэтому «ко всем» это не режим, а прогон одного и того же действия
+    // по каждому файлу со своими цветами фона.
+    if (!assets.length) return
+    setNote(`убираю фон: 0 из ${assets.length}`)
+    let done = 0
+    let touched = 0
+    for (const asset of assets) {
+      try {
+        const pixels = applyEdits(await decode(asset.file), asset.id)
+        const stroke = removeBackground(
+          pixels.data, pixels.width, pixels.height, eraseTolerance, eraseFeather,
+        )
+        if (stroke.length) {
+          pushEdit(asset.id, { type: 'erase', pixels: stroke })
+          touched++
+        }
+      } catch {
+        setNote(`не открылся файл ${asset.name}`)
+      }
+      done++
+      if (done % 5 === 0) setNote(`убираю фон: ${done} из ${assets.length}`)
+    }
+    setNote(`фон убран у ${touched} из ${assets.length} картинок`)
+  }, [assets, eraseTolerance, eraseFeather, applyEdits, pushEdit])
+
   const dropBackground = useCallback(async () => {
     if (!current) return
     const pixels = applyEdits(await decode(current.file), current.id)
@@ -528,6 +556,9 @@ export default function App() {
         />
         <EditorCanvas
           source={canvasSource}
+          compare={current?.originalUrl ?? null}
+          compareMode={compareMode}
+          onToggleCompare={() => setCompareMode((on) => !on)}
           overlay={overlay}
           viewKey={current?.id ?? 'empty'}
           tool={tool}
@@ -578,6 +609,13 @@ export default function App() {
               Отменить
             </button>
           </div>
+          <button className="wide" onClick={dropBackgroundEverywhere} disabled={assets.length < 2}>
+            Убрать фон у всех ({assets.length})
+          </button>
+          <p className="hint">
+            Ползунки обработки общие для всей пачки. Стирания, лассо и убранный
+            фон — у каждой картинки свои.
+          </p>
         </FloatingPanel>
       )}
 

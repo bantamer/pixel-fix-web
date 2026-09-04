@@ -208,3 +208,17 @@ button.active { border-color: var(--accent); color: var(--accent); }
   color: var(--muted);
   pointer-events: none;
 }
+
+.stage-body.compare { display: flex; gap: 8px; }
+.stage-pane { position: relative; flex: 1; min-width: 0; }
+.pane-label {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(20, 22, 26, 0.75);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
