@@ -79,14 +79,9 @@ export default function App() {
   const [dragging, setDragging] = useState(false)
 
   // Пул живёт всю сессию страницы. В StrictMode эффект с cleanup убил бы
-  // воркеры на повторном монтировании, поэтому держим его в ref.
-  const poolRef = useRef<WorkerPool | null>(null)
-  if (!poolRef.current) poolRef.current = new WorkerPool()
-  const pool = poolRef.current
-
+  // воркеры на повторном монтировании, поэтому создаём его лениво в состоянии.
+  const [pool] = useState(() => new WorkerPool())
   const generation = useRef(0)
-  const settingsRef = useRef(settings)
-  settingsRef.current = settings
 
   const visible = assets.slice(0, limit)
 
@@ -102,7 +97,7 @@ export default function App() {
       setBusy(targets.length)
       for (const asset of targets) {
         if (generation.current !== run) return
-        const result = await pool.run(asset, settingsRef.current)
+        const result = await pool.run(asset, settings)
         if (generation.current !== run) return
         const blob = await toBlob(result.data, result.width, result.height)
         setResults((prev) => {
@@ -185,9 +180,7 @@ export default function App() {
       const cached = results.get(asset.id)
       const blob = cached
         ? cached.blob
-        : await pool
-            .run(asset, settingsRef.current)
-            .then((r) => toBlob(r.data, r.width, r.height))
+        : await pool.run(asset, settings).then((r) => toBlob(r.data, r.width, r.height))
       zip.file(asset.path.replace(/\.[^.]+$/, '') + '.png', blob)
     }
     const archive = await zip.generateAsync({ type: 'blob' })
@@ -196,7 +189,7 @@ export default function App() {
     link.download = 'pixel-fix.zip'
     link.click()
     setNote(`архив собран: ${assets.length} файлов`)
-  }, [assets, results, pool])
+  }, [assets, results, pool, settings])
 
   const current = assets.find((a) => a.id === selected) ?? null
   const currentResult = current ? results.get(current.id) : null
