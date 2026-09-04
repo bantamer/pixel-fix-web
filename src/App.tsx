@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import {
   defaultSettings,
@@ -36,6 +36,17 @@ interface Edit {
   type: 'erase' | 'restore'
   pixels: Int32Array
 }
+
+/**
+ * Шаг истории. Одна лента на всё: пользователь ждёт, что Ctrl+Z отменит
+ * последнее сделанное, будь то мазок ластиком или сдвинутый ползунок.
+ */
+type Step =
+  | { kind: 'settings'; before: Settings; after: Settings; keys: string }
+  | { kind: 'edit'; assetId: string; edit: Edit }
+
+/** Пауза, внутри которой правки одного ползунка считаются одним шагом. */
+const COALESCE_MS = 700
 
 interface Result {
   url: string
@@ -107,8 +118,9 @@ export default function App() {
   const [assets, setAssets] = useState<Asset[]>([])
   const [results, setResults] = useState<Map<string, Result>>(new Map())
   const [edits, setEdits] = useState<Map<string, Edit[]>>(new Map())
-  // Отменённые правки не выбрасываем — из них собирается «вернуть».
-  const [undone, setUndone] = useState<Map<string, Edit[]>>(new Map())
+  const [history, setHistory] = useState<Step[]>([])
+  const [future, setFuture] = useState<Step[]>([])
+  const lastStepAt = useRef(0)
   const [selected, setSelected] = useState<string | null>(null)
   const [limit, setLimit] = useState(GALLERY_STEP)
   const [busy, setBusy] = useState(0)
@@ -128,8 +140,6 @@ export default function App() {
 
   const current = assets.find((a) => a.id === selected) ?? null
   const currentResult = current ? results.get(current.id) : null
-  const editList = current ? (edits.get(current.id) ?? []) : []
-  const undoneList = current ? (undone.get(current.id) ?? []) : []
   const settingsKey = JSON.stringify(settings)
 
   const applyEdits = useCallback(
@@ -322,14 +332,42 @@ export default function App() {
       next.set(id, [...(next.get(id) ?? []), edit])
       return next
     })
-    // Новая правка обрывает ветку отменённого: возвращать больше нечего.
-    setUndone((prev) => {
-      if (!prev.has(id)) return prev
-      const next = new Map(prev)
-      next.delete(id)
-      return next
-    })
+    setHistory((prev) => [...prev, { kind: 'edit', assetId: id, edit }])
+    setFuture([])
+    lastStepAt.current = 0
   }, [])
+
+  /**
+   * Меняет настройки и кладёт шаг в историю. Движение одного ползунка
+   * рождает десятки изменений — подряд идущие правки тех же ключей
+   * склеиваются в один шаг, иначе Ctrl+Z пришлось бы жать сто раз.
+   */
+  const applySettings = useCallback(
+    (update: Partial<Settings> | ((current: Settings) => Settings)) => {
+      setSettings((current) => {
+        const next =
+          typeof update === 'function' ? update(current) : { ...current, ...update }
+        const keys = (Object.keys(next) as Array<keyof Settings>)
+          .filter((key) => JSON.stringify(next[key]) !== JSON.stringify(current[key]))
+          .join(',')
+        if (!keys) return current
+
+        const now = performance.now()
+        const fresh = now - lastStepAt.current < COALESCE_MS
+        lastStepAt.current = now
+        setHistory((prev) => {
+          const last = prev[prev.length - 1]
+          if (fresh && last?.kind === 'settings' && last.keys === keys) {
+            return [...prev.slice(0, -1), { ...last, after: next }]
+          }
+          return [...prev, { kind: 'settings', before: current, after: next, keys }]
+        })
+        setFuture([])
+        return next
+      })
+    },
+    [],
+  )
 
   const onCanvasPick = useCallback(
     async (x: number, y: number) => {
@@ -347,7 +385,7 @@ export default function App() {
           pixels.data[index + 1],
           pixels.data[index + 2],
         ]
-        setSettings((c) => ({ ...c, outlineColor: color }))
+        applySettings({ outlineColor: color })
         setNote(`цвет обводки: rgb(${color.join(', ')})`)
         return
       }
@@ -369,7 +407,7 @@ export default function App() {
           : `стёрто ${stroke.length} px (${share.toFixed(1)}%)`,
       )
     },
-    [current, tool, eraseTolerance, eraseFeather, applyEdits, pushEdit],
+    [current, tool, eraseTolerance, eraseFeather, applyEdits, pushEdit, applySettings],
   )
 
   const onCanvasLasso = useCallback(
@@ -428,47 +466,59 @@ export default function App() {
     setNote(`фон убран: ${stroke.length} px`)
   }, [current, eraseTolerance, eraseFeather, applyEdits, pushEdit])
 
-  const undoEdit = useCallback(() => {
-    if (!current) return
-    const id = current.id
+  const dropEdit = useCallback((assetId: string) => {
     setEdits((prev) => {
-      const list = prev.get(id)
+      const list = prev.get(assetId)
       if (!list?.length) return prev
-      const edit = list[list.length - 1]
-      setUndone((stack) => {
-        const next = new Map(stack)
-        next.set(id, [...(next.get(id) ?? []), edit])
-        return next
-      })
       const next = new Map(prev)
       const rest = list.slice(0, -1)
-      if (rest.length) next.set(id, rest)
-      else next.delete(id)
+      if (rest.length) next.set(assetId, rest)
+      else next.delete(assetId)
       return next
     })
-    setNote('правка отменена')
-  }, [current])
+  }, [])
 
-  const redoEdit = useCallback(() => {
-    if (!current) return
-    const id = current.id
-    setUndone((prev) => {
-      const list = prev.get(id)
-      if (!list?.length) return prev
-      const edit = list[list.length - 1]
-      setEdits((stack) => {
-        const next = new Map(stack)
-        next.set(id, [...(next.get(id) ?? []), edit])
-        return next
-      })
+  const addEdit = useCallback((assetId: string, edit: Edit) => {
+    setEdits((prev) => {
       const next = new Map(prev)
-      const rest = list.slice(0, -1)
-      if (rest.length) next.set(id, rest)
-      else next.delete(id)
+      next.set(assetId, [...(next.get(assetId) ?? []), edit])
       return next
     })
-    setNote('правка возвращена')
-  }, [current])
+  }, [])
+
+  const undoStep = useCallback(() => {
+    setHistory((prev) => {
+      const step = prev[prev.length - 1]
+      if (!step) return prev
+      if (step.kind === 'settings') {
+        setSettings(step.before)
+        setNote('настройки откачены')
+      } else {
+        dropEdit(step.assetId)
+        setNote('правка отменена')
+      }
+      setFuture((stack) => [...stack, step])
+      lastStepAt.current = 0
+      return prev.slice(0, -1)
+    })
+  }, [dropEdit])
+
+  const redoStep = useCallback(() => {
+    setFuture((prev) => {
+      const step = prev[prev.length - 1]
+      if (!step) return prev
+      if (step.kind === 'settings') {
+        setSettings(step.after)
+        setNote('настройки возвращены')
+      } else {
+        addEdit(step.assetId, step.edit)
+        setNote('правка возвращена')
+      }
+      setHistory((stack) => [...stack, step])
+      lastStepAt.current = 0
+      return prev.slice(0, -1)
+    })
+  }, [addEdit])
 
   // Ctrl/Cmd+Z отменяет, с Shift — возвращает. Игнорируем нажатия в полях
   // ввода, чтобы не мешать правке текста.
@@ -479,12 +529,12 @@ export default function App() {
       const target = event.target
       if (target instanceof HTMLElement && target.closest('input, textarea')) return
       event.preventDefault()
-      if (event.shiftKey) redoEdit()
-      else undoEdit()
+      if (event.shiftKey) redoStep()
+      else undoStep()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undoEdit, redoEdit])
+  }, [undoStep, redoStep])
 
   const togglePanel = useCallback((id: string) => {
     setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -510,7 +560,7 @@ export default function App() {
         max={max}
         step={step}
         value={(settings[key] as number) * scale}
-        onChange={(e) => setSettings({ ...settings, [key]: Number(e.target.value) / scale })}
+        onChange={(e) => applySettings({ [key]: Number(e.target.value) / scale })}
       />
     </label>
   )
@@ -520,7 +570,7 @@ export default function App() {
       <input
         type="checkbox"
         checked={settings[key] as boolean}
-        onChange={(e) => setSettings({ ...settings, [key]: e.target.checked })}
+        onChange={(e) => applySettings({ [key]: e.target.checked })}
       />
       {label}
     </label>
@@ -588,14 +638,10 @@ export default function App() {
         >
           Оригинал
         </button>
-        <button onClick={undoEdit} disabled={!editList.length} title="Ctrl/Cmd + Z">
+        <button onClick={undoStep} disabled={!history.length} title="Ctrl/Cmd + Z">
           Отменить
         </button>
-        <button
-          onClick={redoEdit}
-          disabled={!undoneList.length}
-          title="Ctrl/Cmd + Shift + Z"
-        >
+        <button onClick={redoStep} disabled={!future.length} title="Ctrl/Cmd + Shift + Z">
           Вернуть
         </button>
         <button onClick={downloadZip} disabled={!assets.length}>
@@ -666,10 +712,10 @@ export default function App() {
             <button onClick={dropBackground} disabled={!current}>
               Убрать фон
             </button>
-            <button onClick={undoEdit} disabled={!editList.length}>
+            <button onClick={undoStep} disabled={!history.length}>
               Отменить
             </button>
-            <button onClick={redoEdit} disabled={!undoneList.length}>
+            <button onClick={redoStep} disabled={!future.length}>
               Вернуть
             </button>
           </div>
@@ -702,7 +748,7 @@ export default function App() {
             />
             <button onClick={() => setTool('pick')}>Пипетка</button>
             <button
-              onClick={() => setSettings({ ...settings, outlineColor: null })}
+              onClick={() => applySettings({ outlineColor: null })}
               disabled={!settings.outlineColor}
             >
               Авто
@@ -711,7 +757,7 @@ export default function App() {
           <button
             className="wide"
             onClick={() =>
-              setSettings((c) => ({
+              applySettings((c) => ({
                 ...c,
                 stripOutline: 30,
                 stripDepth: 4,
@@ -816,7 +862,7 @@ export default function App() {
             </button>
           )}
           <div className="row">
-            <button onClick={() => setSettings(defaultSettings)}>Сбросить настройки</button>
+            <button onClick={() => applySettings(() => defaultSettings)}>Сбросить настройки</button>
             <button
               onClick={async () => {
                 await clearSession()
