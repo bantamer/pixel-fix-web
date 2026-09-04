@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import { defaultSettings, type Settings, type Stats } from './lib/pixelfix'
-import { CompareViewer, type Frame } from './CompareViewer'
+import { CompareViewer } from './CompareViewer'
 import { WorkerPool } from './pool'
 import './App.css'
 
@@ -9,9 +9,7 @@ interface Asset {
   id: string
   name: string
   path: string
-  width: number
-  height: number
-  data: Uint8ClampedArray
+  file: File
   beforeUrl: string
 }
 
@@ -20,11 +18,13 @@ interface Result {
   stats: Stats
   ms: number
   blob: Blob
-  frame: Frame
   key: string
 }
 
 const GALLERY_STEP = 24
+// Потолок кэша результатов: каждая запись держит PNG-блоб, а листать папку
+// можно бесконечно. Самые старые выбрасываем вместе с их объектными URL.
+const RESULT_CACHE = 120
 const IMAGE_TYPES = /\.(png|webp|gif|bmp)$/i
 
 async function decode(file: File): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
@@ -97,7 +97,15 @@ export default function App() {
       setBusy(targets.length)
       for (const asset of targets) {
         if (generation.current !== run) return
-        const result = await pool.run(asset, settings)
+        let result
+        try {
+          const decoded = await decode(asset.file)
+          result = await pool.run(decoded, settings)
+        } catch {
+          setNote(`не открылся файл ${asset.name}`)
+          setBusy((n) => n - 1)
+          continue
+        }
         if (generation.current !== run) return
         const blob = await toBlob(result.data, result.width, result.height)
         setResults((prev) => {
@@ -109,9 +117,14 @@ export default function App() {
             stats: result.stats,
             ms: result.ms,
             blob,
-            frame: { data: result.data, width: result.width, height: result.height },
             key: settingsKey,
           })
+          while (next.size > RESULT_CACHE) {
+            const oldest = next.keys().next().value as string
+            const dropped = next.get(oldest)
+            if (dropped) URL.revokeObjectURL(dropped.url)
+            next.delete(oldest)
+          }
           return next
         })
         setBusy((n) => n - 1)
@@ -129,23 +142,15 @@ export default function App() {
       setNote('картинок не нашлось: нужны png, webp, gif или bmp')
       return
     }
-    setNote(`читаю ${images.length}…`)
-    const loaded: Asset[] = []
-    for (const file of images) {
-      try {
-        const decoded = await decode(file)
-        const blob = await toBlob(decoded.data, decoded.width, decoded.height)
-        loaded.push({
-          id: `${file.name}-${loaded.length}`,
-          name: file.name,
-          path: (file as File & { relPath?: string }).relPath ?? file.name,
-          ...decoded,
-          beforeUrl: URL.createObjectURL(blob),
-        })
-      } catch {
-        setNote(`не открылся файл ${file.name}`)
-      }
-    }
+    // Файлы не распаковываем: держим ссылку и объектный URL самого файла.
+    // Браузер декодирует его сам, когда покажет, и выгружает без нашей помощи.
+    const loaded: Asset[] = images.map((file, index) => ({
+      id: `${file.name}-${index}`,
+      name: file.name,
+      path: (file as File & { relPath?: string }).relPath ?? file.name,
+      file,
+      beforeUrl: URL.createObjectURL(file),
+    }))
     setAssets((previous) => {
       for (const asset of previous) URL.revokeObjectURL(asset.beforeUrl)
       return loaded
@@ -183,7 +188,9 @@ export default function App() {
       const cached = results.get(asset.id)
       const blob = cached
         ? cached.blob
-        : await pool.run(asset, settings).then((r) => toBlob(r.data, r.width, r.height))
+        : await decode(asset.file)
+            .then((decoded) => pool.run(decoded, settings))
+            .then((r) => toBlob(r.data, r.width, r.height))
       zip.file(asset.path.replace(/\.[^.]+$/, '') + '.png', blob)
     }
     const archive = await zip.generateAsync({ type: 'blob' })
@@ -316,9 +323,9 @@ export default function App() {
 
         {current && (
           <CompareViewer
-            before={current}
-            after={currentResult?.frame ?? null}
-            captionBefore={`до · ${current.name} · ${current.width}×${current.height}`}
+            before={current.beforeUrl}
+            after={currentResult?.url ?? null}
+            captionBefore={`до · ${current.name}`}
             captionAfter={
               currentResult
                 ? `после · полости ${currentResult.stats.holes}, щели ${currentResult.stats.gaps}, ` +

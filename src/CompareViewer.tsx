@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export interface Frame {
-  data: Uint8ClampedArray
-  width: number
-  height: number
-}
-
 interface View {
   scale: number
   x: number
@@ -29,10 +23,14 @@ function makeChecker(ctx: CanvasRenderingContext2D): CanvasPattern {
   return ctx.createPattern(tile, 'repeat')!
 }
 
-async function toBitmap(frame: Frame | null): Promise<ImageBitmap | null> {
-  if (!frame) return null
-  const pixels = new Uint8ClampedArray(frame.data.buffer as ArrayBuffer)
-  return createImageBitmap(new ImageData(pixels, frame.width, frame.height))
+/**
+ * Холсты получают картинки ссылками на блобы, а не массивами пикселей:
+ * распакованный кадр 512×512 весит мегабайт, и держать их пачкой нельзя.
+ */
+async function toBitmap(src: string | null): Promise<ImageBitmap | null> {
+  if (!src) return null
+  const blob = await fetch(src).then((response) => response.blob())
+  return createImageBitmap(blob)
 }
 
 /**
@@ -45,8 +43,8 @@ export function CompareViewer({
   captionBefore,
   captionAfter,
 }: {
-  before: Frame
-  after: Frame | null
+  before: string
+  after: string | null
   captionBefore: string
   captionAfter: string
 }) {
@@ -83,24 +81,26 @@ export function CompareViewer({
     }
   }, [before, after])
 
+  const source = bitmaps.before
   const fit = useCallback(() => {
-    if (!size.width || !size.height) return
-    const scale = Math.min(size.width / before.width, size.height / before.height) * 0.94
+    if (!size.width || !size.height || !source) return
+    const scale = Math.min(size.width / source.width, size.height / source.height) * 0.94
     setView({
       scale,
-      x: (size.width - before.width * scale) / 2,
-      y: (size.height - before.height * scale) / 2,
+      x: (size.width - source.width * scale) / 2,
+      y: (size.height - source.height * scale) / 2,
     })
-  }, [before.width, before.height, size])
+  }, [source, size])
 
   // Вписываем заново только при смене картинки или размера окна — иначе
   // вид сбрасывался бы после каждого пересчёта настроек.
   useEffect(() => {
-    const key = `${before.width}x${before.height}:${size.width}x${size.height}`
+    if (!source) return
+    const key = `${before}:${source.width}x${source.height}:${size.width}x${size.height}`
     if (fitted.current === key) return
     fitted.current = key
     fit()
-  }, [fit, before.width, before.height, size])
+  }, [fit, before, source, size])
 
   useEffect(() => {
     const dpr = window.devicePixelRatio || 1
