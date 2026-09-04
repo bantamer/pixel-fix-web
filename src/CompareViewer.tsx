@@ -42,11 +42,13 @@ export function CompareViewer({
   after,
   captionBefore,
   captionAfter,
+  onPick,
 }: {
   before: string
   after: string | null
   captionBefore: string
   captionAfter: string
+  onPick?: (x: number, y: number) => void
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const leftRef = useRef<HTMLCanvasElement>(null)
@@ -56,7 +58,7 @@ export function CompareViewer({
   const [bitmaps, setBitmaps] = useState<{ before: ImageBitmap | null; after: ImageBitmap | null }>(
     { before: null, after: null },
   )
-  const dragging = useRef<{ x: number; y: number } | null>(null)
+  const dragging = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const fitted = useRef<string>('')
 
   // Размер холстов следует за колонкой, поэтому превью занимает всю ширину.
@@ -154,19 +156,27 @@ export function CompareViewer({
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
-    dragging.current = { x: event.clientX, y: event.clientY }
+    dragging.current = { x: event.clientX, y: event.clientY, moved: false }
   }
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!dragging.current) return
     const dx = event.clientX - dragging.current.x
     const dy = event.clientY - dragging.current.y
-    dragging.current = { x: event.clientX, y: event.clientY }
+    if (Math.abs(dx) + Math.abs(dy) > 2) dragging.current.moved = true
+    dragging.current = { x: event.clientX, y: event.clientY, moved: dragging.current.moved }
     setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy }))
   }
 
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.releasePointerCapture(event.pointerId)
+    // Клик без протяжки в режиме пипетки — выбор цвета под курсором.
+    if (onPick && dragging.current && !dragging.current.moved) {
+      const rect = event.currentTarget.getBoundingClientRect()
+      const x = Math.floor((event.clientX - rect.left - view.x) / view.scale)
+      const y = Math.floor((event.clientY - rect.top - view.y) / view.scale)
+      if (source && x >= 0 && y >= 0 && x < source.width && y < source.height) onPick(x, y)
+    }
     dragging.current = null
   }
 
@@ -188,7 +198,7 @@ export function CompareViewer({
     })
 
   const canvasProps = {
-    className: 'viewer-canvas',
+    className: onPick ? 'viewer-canvas picking' : 'viewer-canvas',
     onPointerDown,
     onPointerMove,
     onPointerUp,

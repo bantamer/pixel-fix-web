@@ -77,6 +77,7 @@ export default function App() {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('перетащи сюда ассеты или папку')
   const [dragging, setDragging] = useState(false)
+  const [picking, setPicking] = useState(false)
 
   // Пул живёт всю сессию страницы. В StrictMode эффект с cleanup убил бы
   // воркеры на повторном монтировании, поэтому создаём его лениво в состоянии.
@@ -181,6 +182,44 @@ export default function App() {
     [addFiles],
   )
 
+  const pickColor = useCallback(
+    async (x: number, y: number) => {
+      const asset = assets.find((a) => a.id === selected)
+      if (!asset) return
+      const decoded = await decode(asset.file)
+      const index = (y * decoded.width + x) * 4
+      if (decoded.data[index + 3] === 0) {
+        setNote('в этой точке пусто — ткни в саму обводку')
+        return
+      }
+      const color: [number, number, number] = [
+        decoded.data[index],
+        decoded.data[index + 1],
+        decoded.data[index + 2],
+      ]
+      setSettings((current) => ({ ...current, outlineColor: color }))
+      setPicking(false)
+      setNote(`цвет обводки: rgb(${color.join(', ')})`)
+    },
+    [assets, selected],
+  )
+
+  const applyOutlineFlow = useCallback(() => {
+    // Готовый сценарий: снять старую обводку, восстановить тело, выровнять
+    // силуэт и нарисовать обводку заново поверх чистого края.
+    setSettings((current) => ({
+      ...current,
+      stripOutline: 60,
+      mergeTolerance: 26,
+      smoothRadius: 4,
+      regionSmooth: 2,
+      despeckle: 6,
+      outlineGrow: 3,
+      outlineThickness: 0,
+    }))
+    setNote('включён сценарий: обводка заново')
+  }, [])
+
   const downloadZip = useCallback(async () => {
     const zip = new JSZip()
     setNote('считаю всё для архива…')
@@ -269,9 +308,38 @@ export default function App() {
         {slider('Растяжка цвета за край', 'colorBleed', 0, 8)}
 
         <h2>Обводка</h2>
+        <button className="ghost" onClick={applyOutlineFlow}>
+          Сценарий: обводка заново
+        </button>
+        <div className="picker">
+          <button
+            className={picking ? 'active' : undefined}
+            onClick={() => setPicking((on) => !on)}
+            disabled={!current}
+          >
+            {picking ? 'Ткни в обводку…' : 'Пипетка'}
+          </button>
+          <span
+            className="swatch"
+            style={{
+              background: settings.outlineColor
+                ? `rgb(${settings.outlineColor.join(',')})`
+                : 'repeating-linear-gradient(45deg,#555,#555 4px,#333 4px,#333 8px)',
+            }}
+            title={settings.outlineColor ? settings.outlineColor.join(', ') : 'определяется сам'}
+          />
+          <button
+            onClick={() => setSettings({ ...settings, outlineColor: null })}
+            disabled={!settings.outlineColor}
+          >
+            Авто
+          </button>
+        </div>
+        {slider('Снять обводку (допуск)', 'stripOutline', 0, 90)}
+        {slider('Нарисовать обводку', 'outlineGrow', 0, 6)}
+        {slider('Перекрасить кромку', 'outlineThickness', 0, 6)}
         {slider('Снять светлую кайму', 'haloStrip', 0, 5)}
         {slider('Порог светлой каймы', 'haloLevel', 100, 255)}
-        {slider('Толщина обводки', 'outlineThickness', 0, 6)}
 
         <h2>Цвет</h2>
         {slider('Слить похожие цвета', 'mergeTolerance', 0, 60)}
@@ -333,11 +401,13 @@ export default function App() {
             before={current.beforeUrl}
             after={currentResult?.url ?? null}
             captionBefore={`до · ${current.name}`}
+            onPick={picking ? pickColor : undefined}
             captionAfter={
               currentResult
                 ? `после · полости ${currentResult.stats.holes}, щели ${currentResult.stats.gaps}, ` +
                   `сглажено ${currentResult.stats.smoothed}, цвет ${currentResult.stats.recolored}` +
                   (currentResult.stats.merged ? `, слито ${currentResult.stats.merged}` : '') +
+                  (currentResult.stats.stripped ? `, снято ${currentResult.stats.stripped}` : '') +
                   (currentResult.stats.halo ? `, кайма ${currentResult.stats.halo}` : '') +
                   (currentResult.stats.outline ? `, обводка ${currentResult.stats.outline}` : '') +
                   (currentResult.stats.grid ? `, сетка ${currentResult.stats.grid}` : '') +

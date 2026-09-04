@@ -31,6 +31,9 @@ export interface Settings {
   haloStrip: number
   haloLevel: number
   outlineThickness: number
+  stripOutline: number
+  outlineGrow: number
+  outlineColor: [number, number, number] | null
 }
 
 export const defaultSettings: Settings = {
@@ -59,6 +62,9 @@ export const defaultSettings: Settings = {
   haloStrip: 0,
   haloLevel: 200,
   outlineThickness: 0,
+  stripOutline: 0,
+  outlineGrow: 0,
+  outlineColor: null,
 }
 
 export interface Bitmap {
@@ -68,6 +74,7 @@ export interface Bitmap {
 }
 
 export interface Stats {
+  stripped: number
   holes: number
   gaps: number
   specks: number
@@ -713,11 +720,51 @@ export function detectOutlineColor(
   return [(bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255]
 }
 
+/**
+ * Снимает обводку: убирает пиксели цвета обводки, лежащие по краю силуэта.
+ *
+ * Берём только те куски, что касаются кромки, — тёмные детали внутри рисунка
+ * (зрачок, отверстие, тень) остаются на месте. После съёма силуэт становится
+ * чистым телом без каймы, и новую обводку можно нарисовать ровной.
+ */
+export function stripOutlineColor(
+  rgb: Int16Array,
+  solid: Uint8Array,
+  w: number,
+  h: number,
+  color: [number, number, number],
+  tolerance: number,
+): Uint8Array {
+  const total = w * h
+  const limit = tolerance * tolerance
+  const similar = new Uint8Array(total)
+  for (let i = 0; i < total; i++) {
+    if (!solid[i]) continue
+    const dr = rgb[i * 3] - color[0]
+    const dg = rgb[i * 3 + 1] - color[1]
+    const db = rgb[i * 3 + 2] - color[2]
+    if (dr * dr + dg * dg + db * db <= limit) similar[i] = 1
+  }
+
+  // Кромка: пиксели силуэта, у которых есть прозрачный сосед.
+  const exposed = dilate(invert(solid), w, h, 1)
+  const labels = connectedComponents(similar, w, h)
+  const touching = new Set<number>()
+  for (let i = 0; i < total; i++) {
+    if (similar[i] && exposed[i]) touching.add(labels[i])
+  }
+  const doomed = new Uint8Array(total)
+  for (let i = 0; i < total; i++) {
+    if (similar[i] && touching.has(labels[i])) doomed[i] = 1
+  }
+  return doomed
+}
+
 /** Полный пайплайн обработки одного спрайта. */
 export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; stats: Stats } {
   const stats: Stats = {
     holes: 0, gaps: 0, specks: 0, fringe: 0, smoothed: 0, recolored: 0, grid: 0,
-    merged: 0, halo: 0, outline: 0,
+    merged: 0, halo: 0, outline: 0, stripped: 0,
   }
 
   let image = input
@@ -750,6 +797,25 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     if (solid[i]) anySolid = true
   }
   if (!anySolid) return { image, stats }
+
+  // Цвет обводки нужен и для съёма, и для рисовки — считаем один раз по
+  // исходному силуэту, пока обводка ещё на месте.
+  const outlineColor =
+    cfg.outlineColor ??
+    (cfg.stripOutline > 0 || cfg.outlineGrow > 0 || cfg.outlineThickness > 0
+      ? detectOutlineColor(rgb, solid, w, h)
+      : null)
+
+  if (cfg.stripOutline > 0 && outlineColor) {
+    const doomed = stripOutlineColor(rgb, solid, w, h, outlineColor, cfg.stripOutline)
+    for (let i = 0; i < total; i++) {
+      if (doomed[i]) {
+        solid[i] = 0
+        alpha[i] = 0
+        stats.stripped++
+      }
+    }
+  }
 
   const toFill = new Uint8Array(total)
 
@@ -922,11 +988,26 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
     }
   }
 
+  if (cfg.outlineGrow > 0 && outlineColor) {
+    // Обводка наращивается снаружи тела, поэтому спрайт не худеет от съёма
+    // старой каймы, а форма берётся уже сглаженной.
+    const grown = dilate(solid, w, h, cfg.outlineGrow)
+    for (let i = 0; i < total; i++) {
+      if (!grown[i] || solid[i]) continue
+      rgb[i * 3] = outlineColor[0]
+      rgb[i * 3 + 1] = outlineColor[1]
+      rgb[i * 3 + 2] = outlineColor[2]
+      alpha[i] = 255
+      solid[i] = 1
+      stats.outline++
+    }
+  }
+
   if (cfg.outlineThickness > 0) {
     // Заливка дырок красит их модой соседей, а вокруг разрыва в обводке
     // соседей-заливки больше — обводка так и остаётся дырявой. Поэтому
     // кромку просто перерисовываем найденным цветом обводки.
-    const color = detectOutlineColor(rgb, solid, w, h)
+    const color = outlineColor
     if (color) {
       const inner = erode(solid, w, h, cfg.outlineThickness)
       for (let i = 0; i < total; i++) {

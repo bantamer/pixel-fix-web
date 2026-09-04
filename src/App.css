@@ -122,6 +122,18 @@ header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   touch-action: none;
 }
 .viewer-canvas:active { cursor: grabbing; }
+.viewer-canvas.picking { cursor: crosshair; }
+
+.picker { display: flex; align-items: center; gap: 8px; margin: 6px 8px 10px; }
+.picker button { padding: 5px 10px; }
+.picker button.active { border-color: var(--accent); color: var(--accent); }
+.swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  flex: none;
+}
 
 .checker {
   image-rendering: pixelated;
