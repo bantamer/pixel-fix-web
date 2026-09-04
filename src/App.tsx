@@ -107,6 +107,8 @@ export default function App() {
   const [assets, setAssets] = useState<Asset[]>([])
   const [results, setResults] = useState<Map<string, Result>>(new Map())
   const [edits, setEdits] = useState<Map<string, Edit[]>>(new Map())
+  // Отменённые правки не выбрасываем — из них собирается «вернуть».
+  const [undone, setUndone] = useState<Map<string, Edit[]>>(new Map())
   const [selected, setSelected] = useState<string | null>(null)
   const [limit, setLimit] = useState(GALLERY_STEP)
   const [busy, setBusy] = useState(0)
@@ -127,6 +129,7 @@ export default function App() {
   const current = assets.find((a) => a.id === selected) ?? null
   const currentResult = current ? results.get(current.id) : null
   const editList = current ? (edits.get(current.id) ?? []) : []
+  const undoneList = current ? (undone.get(current.id) ?? []) : []
   const settingsKey = JSON.stringify(settings)
 
   const applyEdits = useCallback(
@@ -319,6 +322,13 @@ export default function App() {
       next.set(id, [...(next.get(id) ?? []), edit])
       return next
     })
+    // Новая правка обрывает ветку отменённого: возвращать больше нечего.
+    setUndone((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Map(prev)
+      next.delete(id)
+      return next
+    })
   }, [])
 
   const onCanvasPick = useCallback(
@@ -420,17 +430,61 @@ export default function App() {
 
   const undoEdit = useCallback(() => {
     if (!current) return
+    const id = current.id
     setEdits((prev) => {
-      const list = prev.get(current.id)
+      const list = prev.get(id)
       if (!list?.length) return prev
+      const edit = list[list.length - 1]
+      setUndone((stack) => {
+        const next = new Map(stack)
+        next.set(id, [...(next.get(id) ?? []), edit])
+        return next
+      })
       const next = new Map(prev)
       const rest = list.slice(0, -1)
-      if (rest.length) next.set(current.id, rest)
-      else next.delete(current.id)
+      if (rest.length) next.set(id, rest)
+      else next.delete(id)
       return next
     })
-    setNote('последняя правка отменена')
+    setNote('правка отменена')
   }, [current])
+
+  const redoEdit = useCallback(() => {
+    if (!current) return
+    const id = current.id
+    setUndone((prev) => {
+      const list = prev.get(id)
+      if (!list?.length) return prev
+      const edit = list[list.length - 1]
+      setEdits((stack) => {
+        const next = new Map(stack)
+        next.set(id, [...(next.get(id) ?? []), edit])
+        return next
+      })
+      const next = new Map(prev)
+      const rest = list.slice(0, -1)
+      if (rest.length) next.set(id, rest)
+      else next.delete(id)
+      return next
+    })
+    setNote('правка возвращена')
+  }, [current])
+
+  // Ctrl/Cmd+Z отменяет, с Shift — возвращает. Игнорируем нажатия в полях
+  // ввода, чтобы не мешать правке текста.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
+      // Событие может прийти от window, у которого нет closest.
+      const target = event.target
+      if (target instanceof HTMLElement && target.closest('input, textarea')) return
+      event.preventDefault()
+      if (event.shiftKey) redoEdit()
+      else undoEdit()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undoEdit, redoEdit])
 
   const togglePanel = useCallback((id: string) => {
     setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -534,8 +588,15 @@ export default function App() {
         >
           Оригинал
         </button>
-        <button onClick={undoEdit} disabled={!editList.length}>
-          Отменить правку
+        <button onClick={undoEdit} disabled={!editList.length} title="Ctrl/Cmd + Z">
+          Отменить
+        </button>
+        <button
+          onClick={redoEdit}
+          disabled={!undoneList.length}
+          title="Ctrl/Cmd + Shift + Z"
+        >
+          Вернуть
         </button>
         <button onClick={downloadZip} disabled={!assets.length}>
           Скачать ZIP
@@ -607,6 +668,9 @@ export default function App() {
             </button>
             <button onClick={undoEdit} disabled={!editList.length}>
               Отменить
+            </button>
+            <button onClick={redoEdit} disabled={!undoneList.length}>
+              Вернуть
             </button>
           </div>
           <button className="wide" onClick={dropBackgroundEverywhere} disabled={assets.length < 2}>
