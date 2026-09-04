@@ -33,6 +33,7 @@ export interface Settings {
   outlineThickness: number
   stripOutline: number
   stripDepth: number
+  outlineSmooth: number
   outlineGrow: number
   outlineColor: [number, number, number] | null
 }
@@ -65,6 +66,7 @@ export const defaultSettings: Settings = {
   outlineThickness: 0,
   stripOutline: 0,
   stripDepth: 3,
+  outlineSmooth: 0,
   outlineGrow: 0,
   outlineColor: null,
 }
@@ -1322,6 +1324,49 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
         stats.outline++
       }
     }
+  }
+
+  if (cfg.outlineSmooth > 0 && outlineColor) {
+    // Сглаживание границы обводки с заливкой. Работает по одной маске —
+    // «это обводка или нет», поэтому остальные цвета не участвуют в
+    // голосовании и рисунок внутри остаётся нетронутым.
+    const near = cfg.stripOutline > 0 ? cfg.stripOutline : 40
+    const limit = near * near
+    const wasOutline = new Uint8Array(total)
+    for (let i = 0; i < total; i++) {
+      if (!solid[i]) continue
+      const dr = rgb[i * 3] - outlineColor[0]
+      const dg = rgb[i * 3 + 1] - outlineColor[1]
+      const db = rgb[i * 3 + 2] - outlineColor[2]
+      if (dr * dr + dg * dg + db * db <= limit) wasOutline[i] = 1
+    }
+
+    const field = new Float64Array(total)
+    for (let i = 0; i < total; i++) field[i] = wasOutline[i]
+    const smoothed = boxBlur(field, w, h, cfg.outlineSmooth)
+
+    const added = new Uint8Array(total)
+    const removed = new Uint8Array(total)
+    for (let i = 0; i < total; i++) {
+      if (!solid[i]) continue
+      const next = smoothed[i] >= 0.5 ? 1 : 0
+      if (next && !wasOutline[i]) added[i] = 1
+      if (!next && wasOutline[i]) removed[i] = 1
+    }
+
+    // Пиксели, переставшие быть обводкой, забирают цвет у ближайшей заливки.
+    if (removed.some((v) => v)) {
+      const body = new Uint8Array(total)
+      for (let i = 0; i < total; i++) body[i] = solid[i] && !wasOutline[i] ? 1 : 0
+      fillColors(rgb, body, removed, w, h)
+    }
+    for (let i = 0; i < total; i++) {
+      if (!added[i]) continue
+      rgb[i * 3] = outlineColor[0]
+      rgb[i * 3 + 1] = outlineColor[1]
+      rgb[i * 3 + 2] = outlineColor[2]
+    }
+    stats.outline += added.reduce((sum, v) => sum + v, 0) + removed.reduce((sum, v) => sum + v, 0)
   }
 
   if (cfg.defringe) {
