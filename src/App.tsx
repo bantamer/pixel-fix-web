@@ -143,6 +143,8 @@ export default function App() {
   const [history, setHistory] = useState<Step[]>([])
   const [future, setFuture] = useState<Step[]>([])
   const lastStepAt = useRef(0)
+  // Куда вернуть инструмент после отпускания пробела.
+  const spaceReturn = useRef<ToolId | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [limit, setLimit] = useState(GALLERY_STEP)
   const [busy, setBusy] = useState(0)
@@ -596,28 +598,6 @@ export default function App() {
     })
   }, [addEdit])
 
-  // Ctrl/Cmd+Z отменяет, с Shift — возвращает. Игнорируем нажатия в полях
-  // ввода, чтобы не мешать правке текста.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
-      // Событие может прийти от window, у которого нет closest.
-      const target = event.target
-      if (target instanceof HTMLElement && target.closest('input, textarea')) return
-      event.preventDefault()
-      if (event.shiftKey) redoStep()
-      else undoStep()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [undoStep, redoStep])
-
-  const togglePanel = useCallback((id: string) => {
-    setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
-
-  // Выбрал инструмент — открылись его параметры. Иначе непонятно, где
-  // крутить допуск: инструмент в одном месте, его ручки в другом.
   const selectTool = useCallback((next: ToolId) => {
     setTool(next)
     // Своё окно есть только у палочки и лассо — там настраивать допуск.
@@ -626,6 +606,85 @@ export default function App() {
       setPanels((prev) => ({ ...prev, tool: true }))
     }
   }, [])
+
+  // Клавиатура: Ctrl/Cmd+Z отменяет, с Shift возвращает; буквы переключают
+  // инструмент; пробел и O работают на удержание. Нажатия в полях ввода
+  // пропускаем, чтобы не мешать правке текста.
+  useEffect(() => {
+    const inField = (event: KeyboardEvent) => {
+      const target = event.target
+      return target instanceof HTMLElement && !!target.closest('input, textarea')
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (inField(event)) return
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) redoStep()
+        else undoStep()
+        return
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+
+      // Пробел — временная рука, как в графических редакторах.
+      if (event.code === 'Space' && !event.repeat) {
+        event.preventDefault()
+        setTool((current) => {
+          if (current === 'hand') return current
+          spaceReturn.current = current
+          return 'hand'
+        })
+        return
+      }
+      if (event.key.toLowerCase() === 'o' && !event.repeat) {
+        setShowOriginal(true)
+        return
+      }
+      if (event.key === 'Escape') {
+        setTool('hand')
+        return
+      }
+
+      const byKey: Record<string, ToolId> = {
+        h: 'hand',
+        w: 'erase',
+        l: 'lasso',
+        i: 'pick',
+        // те же клавиши в русской раскладке
+        р: 'hand',
+        ц: 'erase',
+        д: 'lasso',
+        ш: 'pick',
+      }
+      const next = byKey[event.key.toLowerCase()]
+      if (next) selectTool(next)
+    }
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (inField(event)) return
+      if (event.code === 'Space') {
+        const back = spaceReturn.current
+        spaceReturn.current = null
+        if (back) setTool(back)
+      }
+      if (event.key.toLowerCase() === 'o') setShowOriginal(false)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [undoStep, redoStep, selectTool])
+
+  const togglePanel = useCallback((id: string) => {
+    setPanels((prev) => ({ ...prev, [id]: !prev[id] }))
+  }, [])
+
+  // Выбрал инструмент — открылись его параметры. Иначе непонятно, где
+  // крутить допуск: инструмент в одном месте, его ручки в другом.
 
   // ---------- разметка ----------
 
@@ -721,7 +780,7 @@ export default function App() {
           onMouseUp={() => setShowOriginal(false)}
           onMouseLeave={() => setShowOriginal(false)}
           disabled={!current}
-          title="Удерживай, чтобы увидеть оригинал"
+          title="Удерживай, чтобы увидеть оригинал · O"
         >
           Оригинал
         </button>

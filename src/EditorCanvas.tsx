@@ -194,6 +194,20 @@ export function EditorCanvas({
     }
   }, [compareMode])
 
+  // F вписывает, 1 показывает пиксель в пиксель. Живут здесь, потому что
+  // вид холста — состояние этого компонента.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const target = event.target
+      if (target instanceof HTMLElement && target.closest('input, textarea')) return
+      if (event.key.toLowerCase() === 'f' || event.key.toLowerCase() === 'а') fit()
+      if (event.key === '1') setView((current) => ({ ...current, scale: 1 }))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [fit])
+
   const toImage = (
     canvas: HTMLCanvasElement,
     clientX: number,
@@ -269,8 +283,8 @@ export function EditorCanvas({
         <button onClick={() => zoomBy(1 / 1.4)}>−</button>
         <span className="zoom">{Math.round(view.scale * 100)}%</span>
         <button onClick={() => zoomBy(1.4)}>+</button>
-        <button onClick={fit}>Вписать</button>
-        <button onClick={() => setView((c) => ({ ...c, scale: 1 }))}>1:1</button>
+        <button onClick={fit} title="F">Вписать</button>
+        <button onClick={() => setView((c) => ({ ...c, scale: 1 }))} title="1">1:1</button>
         <button className={compareMode ? 'active' : undefined} onClick={onToggleCompare}>
           Сравнить
         </button>
