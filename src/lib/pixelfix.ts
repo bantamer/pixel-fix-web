@@ -32,6 +32,7 @@ export interface Settings {
   haloLevel: number
   outlineThickness: number
   stripOutline: number
+  stripDepth: number
   outlineGrow: number
   outlineColor: [number, number, number] | null
 }
@@ -63,6 +64,7 @@ export const defaultSettings: Settings = {
   haloLevel: 200,
   outlineThickness: 0,
   stripOutline: 0,
+  stripDepth: 3,
   outlineGrow: 0,
   outlineColor: null,
 }
@@ -721,11 +723,14 @@ export function detectOutlineColor(
 }
 
 /**
- * Снимает обводку: убирает пиксели цвета обводки, лежащие по краю силуэта.
+ * Снимает обводку: тонкую ленту цвета обводки вдоль кромки силуэта.
  *
- * Берём только те куски, что касаются кромки, — тёмные детали внутри рисунка
- * (зрачок, отверстие, тень) остаются на месте. После съёма силуэт становится
- * чистым телом без каймы, и новую обводку можно нарисовать ровной.
+ * Два ограничения делают съём безопасным. Во-первых, снимается только полоса
+ * глубиной depth от края — то, что лежит внутри рисунка, не трогается.
+ * Во-вторых, морфологическое открытие оставляет нетронутыми толстые области
+ * того же цвета: тёмные штаны, ботинки, волосы переживают эрозию, а обводка
+ * в пару пикселей — нет. Без этого у персонажа сносило половину силуэта:
+ * тёмная одежда сливается с обводкой в одну область.
  */
 export function stripOutlineColor(
   rgb: Int16Array,
@@ -734,6 +739,7 @@ export function stripOutlineColor(
   h: number,
   color: [number, number, number],
   tolerance: number,
+  depth: number,
 ): Uint8Array {
   const total = w * h
   const limit = tolerance * tolerance
@@ -746,16 +752,15 @@ export function stripOutlineColor(
     if (dr * dr + dg * dg + db * db <= limit) similar[i] = 1
   }
 
-  // Кромка: пиксели силуэта, у которых есть прозрачный сосед.
-  const exposed = dilate(invert(solid), w, h, 1)
-  const labels = connectedComponents(similar, w, h)
-  const touching = new Set<number>()
-  for (let i = 0; i < total; i++) {
-    if (similar[i] && exposed[i]) touching.add(labels[i])
-  }
+  const reach = Math.max(1, depth)
+  // Открытие: толстые области остаются, тонкая лента исчезает.
+  const kept = dilate(erode(similar, w, h, reach), w, h, reach)
+  // Полоса вдоль кромки: глубже неё не заходим.
+  const nearEdge = dilate(invert(solid), w, h, reach)
+
   const doomed = new Uint8Array(total)
   for (let i = 0; i < total; i++) {
-    if (similar[i] && touching.has(labels[i])) doomed[i] = 1
+    if (similar[i] && nearEdge[i] && !kept[i]) doomed[i] = 1
   }
   return doomed
 }
@@ -807,7 +812,9 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
       : null)
 
   if (cfg.stripOutline > 0 && outlineColor) {
-    const doomed = stripOutlineColor(rgb, solid, w, h, outlineColor, cfg.stripOutline)
+    const doomed = stripOutlineColor(
+      rgb, solid, w, h, outlineColor, cfg.stripOutline, cfg.stripDepth,
+    )
     for (let i = 0; i < total; i++) {
       if (doomed[i]) {
         solid[i] = 0
@@ -976,14 +983,52 @@ export function processImage(input: Bitmap, cfg: Settings): { image: Bitmap; sta
           cfg.regionSmooth, cfg.regionPasses, cfg.regionKeep,
         )
       }
-      for (let i = 0; i < total; i++) {
-        if (!solid[i]) continue
-        const p = index[i] * 3
-        if (rgb[i * 3] !== palette[p] || rgb[i * 3 + 1] !== palette[p + 1] ||
-            rgb[i * 3 + 2] !== palette[p + 2]) stats.recolored++
-        rgb[i * 3] = palette[p]
-        rgb[i * 3 + 1] = palette[p + 1]
-        rgb[i * 3 + 2] = palette[p + 2]
+      if (cfg.paletteColors > 0) {
+        // Квантование пользователь запросил явно — красим цветом палитры.
+        for (let i = 0; i < total; i++) {
+          if (!solid[i]) continue
+          const p = index[i] * 3
+          if (rgb[i * 3] !== palette[p] || rgb[i * 3 + 1] !== palette[p + 1] ||
+              rgb[i * 3 + 2] !== palette[p + 2]) stats.recolored++
+          rgb[i * 3] = palette[p]
+          rgb[i * 3 + 1] = palette[p + 1]
+          rgb[i * 3 + 2] = palette[p + 2]
+        }
+      } else {
+        // Палитра нужна была только для голосования. Красить её усреднёнными
+        // цветами нельзя: на богатом спрайте тридцати двух оттенков не хватает
+        // и фиолетовая кожа уезжает в серый. Берём фактический цвет ближайшего
+        // соседа, который уже принадлежит выигравшей зоне.
+        const before = mapToPalette(rgb, palette)
+        const radius = Math.max(1, cfg.regionSmooth) + 1
+        const source = rgb.slice()
+        for (let i = 0; i < total; i++) {
+          if (!solid[i] || index[i] === before[i]) continue
+          const y = (i / w) | 0
+          const x = i % w
+          let bestDist = Infinity
+          let bestIndex = -1
+          for (let dy = -radius; dy <= radius; dy++) {
+            const ny = y + dy
+            if (ny < 0 || ny >= h) continue
+            for (let dx = -radius; dx <= radius; dx++) {
+              const nx = x + dx
+              if (nx < 0 || nx >= w) continue
+              const j = ny * w + nx
+              if (!solid[j] || before[j] !== index[i]) continue
+              const dist = dy * dy + dx * dx
+              if (dist < bestDist) {
+                bestDist = dist
+                bestIndex = j
+              }
+            }
+          }
+          if (bestIndex < 0) continue
+          rgb[i * 3] = source[bestIndex * 3]
+          rgb[i * 3 + 1] = source[bestIndex * 3 + 1]
+          rgb[i * 3 + 2] = source[bestIndex * 3 + 2]
+          stats.recolored++
+        }
       }
     }
   }

@@ -209,12 +209,13 @@ export default function App() {
     // силуэт и нарисовать обводку заново поверх чистого края.
     setSettings((current) => ({
       ...current,
-      stripOutline: 60,
+      stripOutline: 30,
+      stripDepth: 4,
       mergeTolerance: 26,
       smoothRadius: 4,
       regionSmooth: 2,
       despeckle: 6,
-      outlineGrow: 3,
+      outlineGrow: 4,
       outlineThickness: 0,
     }))
     setNote('включён сценарий: обводка заново')
@@ -336,6 +337,7 @@ export default function App() {
           </button>
         </div>
         {slider('Снять обводку (допуск)', 'stripOutline', 0, 90)}
+        {slider('Глубина съёма, px', 'stripDepth', 1, 10)}
         {slider('Нарисовать обводку', 'outlineGrow', 0, 6)}
         {slider('Перекрасить кромку', 'outlineThickness', 0, 6)}
         {slider('Снять светлую кайму', 'haloStrip', 0, 5)}
