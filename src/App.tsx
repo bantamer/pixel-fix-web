@@ -394,6 +394,7 @@ export default function App() {
           pixels.data[index + 2],
         ]
         applySettings({ outlineColor: color })
+        setTool('hand')
         setNote(`цвет обводки: rgb(${color.join(', ')})`)
         return
       }
@@ -552,7 +553,11 @@ export default function App() {
   // крутить допуск: инструмент в одном месте, его ручки в другом.
   const selectTool = useCallback((next: ToolId) => {
     setTool(next)
-    if (next !== 'hand') setPanels((prev) => ({ ...prev, tool: true }))
+    // Своё окно есть только у палочки и лассо — там настраивать допуск.
+    // Пипетке окно не нужно: курсор и строка подсказки говорят всё.
+    if (next === 'erase' || next === 'lasso') {
+      setPanels((prev) => ({ ...prev, tool: true }))
+    }
   }, [])
 
   // ---------- разметка ----------
@@ -689,7 +694,7 @@ export default function App() {
         />
       </div>
 
-      {panels.tool && (
+      {panels.tool && (tool === 'erase' || tool === 'lasso') && (
         <FloatingPanel
           id="tool"
           title={`Инструмент: ${TOOL_TITLES[tool]}`}
@@ -743,30 +748,6 @@ export default function App() {
             </>
           )}
 
-          {tool === 'pick' && (
-            <div className="row">
-              <span
-                className="swatch"
-                style={{
-                  background: settings.outlineColor
-                    ? `rgb(${settings.outlineColor.join(',')})`
-                    : 'repeating-linear-gradient(45deg,#555,#555 4px,#333 4px,#333 8px)',
-                }}
-              />
-              <span className="note">
-                {settings.outlineColor
-                  ? `rgb(${settings.outlineColor.join(', ')})`
-                  : 'цвет определяется сам'}
-              </span>
-              <button
-                onClick={() => applySettings({ outlineColor: null })}
-                disabled={!settings.outlineColor}
-              >
-                Авто
-              </button>
-            </div>
-          )}
-
           <div className="row">
             <button onClick={undoStep} disabled={!history.length}>
               Отменить
@@ -799,7 +780,13 @@ export default function App() {
               }}
               title={settings.outlineColor ? settings.outlineColor.join(', ') : 'определяется сам'}
             />
-            <button onClick={() => selectTool('pick')}>Взять пипеткой</button>
+            <button
+              className={tool === 'pick' ? 'active' : undefined}
+              onClick={() => selectTool(tool === 'pick' ? 'hand' : 'pick')}
+              disabled={!current}
+            >
+              {tool === 'pick' ? 'Кликни по обводке…' : 'Пипетка'}
+            </button>
             <button
               onClick={() => applySettings({ outlineColor: null })}
               disabled={!settings.outlineColor}

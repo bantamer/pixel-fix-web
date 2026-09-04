@@ -9,7 +9,6 @@ interface Item {
 
 const TOOLS: Item[] = [
   { id: 'hand', label: 'Рука', hint: 'Двигать и зумить холст', icon: '✋' },
-  { id: 'pick', label: 'Пипетка', hint: 'Взять цвет обводки', icon: '💧' },
   { id: 'erase', label: 'Палочка', hint: 'Стереть область по клику', icon: '✨' },
   { id: 'lasso', label: 'Лассо', hint: 'Вернуть оригинал в области', icon: '🔗' },
 ]
