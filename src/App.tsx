@@ -9,6 +9,15 @@ import {
   type Stats,
 } from './lib/pixelfix'
 import { CompareViewer } from './CompareViewer'
+import {
+  clearSession,
+  loadAssets,
+  loadEdits,
+  loadJson,
+  saveAssets,
+  saveEdits,
+  saveJson,
+} from './storage'
 import { WorkerPool } from './pool'
 import './App.css'
 
@@ -81,8 +90,23 @@ async function walkEntry(entry: FileSystemEntry, prefix = ''): Promise<File[]> {
   return nested.flat()
 }
 
+interface StoredState {
+  selected: string | null
+  eraseTolerance: number
+  eraseFeather: number
+}
+
+/** Прошлое состояние инструментов. localStorage синхронный, читать дёшево. */
+const readState = () => loadJson<StoredState>('state')
+
 export default function App() {
-  const [settings, setSettings] = useState<Settings>(defaultSettings)
+  // Настройки поднимаем сразу при первом рендере: они маленькие и лежат
+  // в localStorage, ждать асинхронной базы ради них незачем.
+  const [settings, setSettings] = useState<Settings>(() => ({
+    ...defaultSettings,
+    ...(loadJson<Partial<Settings>>('settings') ?? {}),
+  }))
+
   const [assets, setAssets] = useState<Asset[]>([])
   const [results, setResults] = useState<Map<string, Result>>(new Map())
   const [selected, setSelected] = useState<string | null>(null)
@@ -93,10 +117,10 @@ export default function App() {
   const [tool, setTool] = useState<'none' | 'pick' | 'erase' | 'lasso'>('none')
   // Допуск стирания мал намеренно: заливка почти не растёт до 24, а дальше
   // срывается — на 32 клик в обводку уносит уже 28% спрайта.
-  const [eraseTolerance, setEraseTolerance] = useState(14)
+  const [eraseTolerance, setEraseTolerance] = useState(() => readState()?.eraseTolerance ?? 14)
   // Добор края: у картинок с антиалиасом граница фона размыта, и без него
   // остаётся светлая кайма — на анимешном png это 1224 пикселя против одного.
-  const [eraseFeather, setEraseFeather] = useState(2)
+  const [eraseFeather, setEraseFeather] = useState(() => readState()?.eraseFeather ?? 2)
   // Ручные стирания: на ассет — стопка мазков (индексы пикселей), чтобы
   // последний можно было отменить. Правки переживают смену настроек.
   const [edits, setEdits] = useState<Map<string, Edit[]>>(new Map())
@@ -180,6 +204,58 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [settingsKey, settings, assets, limit, pool, applyEdits])
 
+  // Восстановление сессии: файлы и правки лежат в IndexedDB, поэтому
+  // поднимаются асинхронно уже после первого кадра. Гардом по ref это
+  // защищать нельзя — в StrictMode он глушит второй монтаж, и сессия
+  // не поднимается вовсе. Отменяем через alive, повторный запуск безвреден.
+  const [restored, setRestored] = useState(false)
+  useEffect(() => {
+    let alive = true
+    Promise.all([loadAssets(), loadEdits()]).then(([stored, savedEdits]) => {
+      if (!alive) return
+      if (stored.length) {
+        const loaded: Asset[] = stored.map((row) => ({
+          id: row.id,
+          name: row.name,
+          path: row.path,
+          file: new File([row.blob], row.name, { type: row.blob.type || 'image/png' }),
+          beforeUrl: URL.createObjectURL(row.blob),
+        }))
+        setAssets(loaded)
+        setEdits(new Map(savedEdits))
+        const wanted = readState()?.selected
+        setSelected(loaded.some((a) => a.id === wanted) ? wanted! : loaded[0].id)
+        setNote(`сессия восстановлена: ${loaded.length} файлов`)
+      }
+      setRestored(true)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  useEffect(() => {
+    saveJson('settings', settings)
+  }, [settingsKey, settings])
+
+  useEffect(() => {
+    saveJson('state', { selected, eraseTolerance, eraseFeather })
+  }, [selected, eraseTolerance, eraseFeather])
+
+  useEffect(() => {
+    // До восстановления не сохраняем: пустая карта затёрла бы прошлые правки.
+    if (!restored) return
+    const timer = setTimeout(() => {
+      saveEdits(edits).catch(() => setNote('правки не сохранились в браузере'))
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [edits, restored])
+
+  const forgetSession = useCallback(async () => {
+    await clearSession()
+    setNote('сессия забыта — файлы и правки больше не восстановятся')
+  }, [])
+
   const addFiles = useCallback(async (files: File[]) => {
     // Отменённый диалог выбора приходит пустым списком — молча выходим,
     // иначе он затирает статус уже загруженной пачки.
@@ -206,9 +282,20 @@ export default function App() {
       for (const result of previous.values()) URL.revokeObjectURL(result.url)
       return new Map()
     })
+    setEdits(new Map())
     setSelected(loaded[0]?.id ?? null)
     setLimit(GALLERY_STEP)
     setNote(`загружено: ${loaded.length}`)
+
+    const saved = await saveAssets(
+      loaded.map((asset) => ({
+        id: asset.id,
+        name: asset.name,
+        path: asset.path,
+        blob: asset.file,
+      })),
+    )
+    if (!saved) setNote(`загружено: ${loaded.length} — пачка слишком велика, сессия не сохранится`)
   }, [])
 
   const onDrop = useCallback(
@@ -568,6 +655,9 @@ export default function App() {
 
         <button className="ghost" onClick={() => setSettings(defaultSettings)}>
           Сбросить настройки
+        </button>
+        <button className="ghost" onClick={forgetSession}>
+          Забыть сессию
         </button>
       </aside>
 
